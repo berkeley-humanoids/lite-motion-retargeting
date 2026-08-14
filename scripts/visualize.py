@@ -1,9 +1,8 @@
-"""Viser-based viewer for the retargeted Lite motion dataset.
+"""Viser viewer for the retargeted motions.
 
-Renders Lite (solid) alongside the source LAFAN1 G1 (alpha-blended ghost).
-Mesh data comes straight from MuJoCo — no yourdfpy / trimesh dependency.
-The GUI exposes an episode dropdown; switching episodes loads the new clip's
-motion arrays on demand.
+Draws Lite solid, with the source LAFAN1 G1 over it as a ghost. The mesh data
+comes from MuJoCo, so the viewer needs no yourdfpy and no trimesh. The GUI holds
+a clip menu, and a new selection loads that motion.
 
 Usage:
     uv run scripts/visualize.py
@@ -25,16 +24,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     FPS,
     G1_LAFAN_JOINT_NAMES,
-    LITE_DATASET_REPO_ID,
     joint_qpos_addr,
     lite_joint_names,
     load_g1_model,
     load_lafan_csv,
     load_lite_model,
 )
+from rrd import LAYER_TRACKING, read_motion  # noqa: E402
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 LAFAN_ROOT: Path = REPO_ROOT / ".cache" / "lafan1_g1"
+DATASET_ROOT: Path = REPO_ROOT / "dataset"
+ROBOT_TYPE: str = "lite_pro"
 
 
 # ── Rotation helpers ──────────────────────────────────────────────────────────
@@ -136,17 +137,16 @@ def _update_pose(
 # ── Dataset / CSV loading ─────────────────────────────────────────────────────
 
 
-def _load_episode_lite(repo_id: str, root: Path, episode_index: int) -> dict[str, np.ndarray]:
-    """Load one Lite LeRobotDataset episode as plain arrays."""
-    from lerobot.datasets import LeRobotDataset
+def _load_motion_lite(clip: str) -> dict[str, np.ndarray]:
+    """Load the retargeted motion of one clip.
 
-    dataset = LeRobotDataset(repo_id=repo_id, root=root, episodes=[episode_index])
-    rows = dataset.hf_dataset.with_format("numpy")[:]
-    return {
-        "base_pos": np.asarray(rows["base_pos"], dtype=np.float64),
-        "base_quat": np.asarray(rows["base_quat"], dtype=np.float64),
-        "joint_pos": np.asarray(rows["joint_pos"], dtype=np.float64),
-    }
+    The motion is the local file that ``retarget.py`` wrote. Run that script
+    first, or fetch the file from the Hub.
+    """
+    path = DATASET_ROOT / LAYER_TRACKING / f"{ROBOT_TYPE}_lafan1_{clip}.rrd"
+    if not path.is_file():
+        raise SystemExit(f"No motion at {path}. Run scripts/retarget.py first.")
+    return read_motion(path)
 
 
 def _load_episode_g1(lafan_root: Path, episode_index: int) -> dict[str, np.ndarray]:
@@ -164,15 +164,13 @@ def _load_episode_g1(lafan_root: Path, episode_index: int) -> dict[str, np.ndarr
 
 def main(
     episode_index: int = 0,
-    repo_id: str = LITE_DATASET_REPO_ID,
     port: int = 8080,
     ghost: bool = True,
 ) -> None:
     """Play one retargeted clip alongside its LAFAN1 source.
 
     Args:
-        episode_index: Initial episode to load (switch later from the GUI).
-        repo_id: Repo identifier of the local LeRobotDataset.
+        episode_index: The clip to load first. The GUI switches between them.
         port: viser HTTP port.
         ghost: Render the source G1 alpha-blended on top of the Lite robot.
     """
@@ -208,7 +206,7 @@ def main(
 
     def load_episode(idx: int) -> None:
         print(f"Loading episode {episode_labels[idx]} …")
-        lite_motion = _load_episode_lite(repo_id, REPO_ROOT, idx)
+        lite_motion = _load_motion_lite(csvs[idx].stem)
         g1_motion = _load_episode_g1(LAFAN_ROOT, idx) if ghost else None
         frames = lite_motion["base_pos"].shape[0]
         if g1_motion is not None:

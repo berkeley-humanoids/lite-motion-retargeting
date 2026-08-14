@@ -10,19 +10,18 @@ Two-step pipeline per clip:
   per-DOF posture cost biases the solution toward step 1 so the refinement
   is a *tweak*, not a rearrangement.
 
-Output is a HuggingFace LeRobotDataset written at the repository root.
+One clip becomes one Rerun ``.rrd`` motion under ``dataset/tracking/``, which
+``--push`` uploads to the Hub. ``scripts/rrd.py`` defines that file.
 
 Usage:
     uv run scripts/retarget.py
     uv run scripts/retarget.py --clip 'walk1_subject1'
     uv run scripts/retarget.py --validate-only
-    uv run scripts/retarget.py --workers 8        # parallel across clips
-    uv run scripts/retarget.py --workers -1       # use all CPU cores
+    uv run scripts/retarget.py --workers -1 --push   # every core, then upload
 """
 
 import os
 import re
-import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -45,7 +44,6 @@ from common import (  # noqa: E402
     LITE_TASK_NAME,
     angular_velocity_from_quat,
     body_id,
-    dataset_features,
     finite_diff,
     joint_qpos_addr,
     lite_joint_names,
@@ -53,13 +51,14 @@ from common import (  # noqa: E402
     load_lafan_csv,
     load_lite_model,
 )
+from rrd import LAYER_TRACKING, write_motion  # noqa: E402
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 LAFAN_ROOT: Path = REPO_ROOT / ".cache" / "lafan1_g1"
-BUILD_ROOT: Path = REPO_ROOT / ".lerobot_build"
-# LeRobotDataset.create refuses an existing destination, so the writer drops
-# its meta/ + data/ tree into BUILD_ROOT and we move it up to REPO_ROOT on
-# finalize.
+DATASET_ROOT: Path = REPO_ROOT / "dataset"
+
+#: The asset the motion drives, which also prefixes every file name.
+ROBOT_TYPE: str = "lite_pro"
 
 # Validation frame stride for the EE-error summary.
 SAMPLE_STRIDE: int = 50
@@ -336,26 +335,45 @@ def validate_ee_tracking(
         )
 
 
-# ── Per-clip pipeline + LeRobotDataset writer ─────────────────────────────────
+# ── Per-clip writer ───────────────────────────────────────────────────────────
 
 
-def _frame_records(
+def write_clip(
+    clip: str,
+    joint_names: tuple[str, ...],
     base_pos: np.ndarray,
     base_quat: np.ndarray,
     joint_pos: np.ndarray,
-) -> dict[str, np.ndarray]:
-    """Compose the six dataset-feature arrays from a per-clip trajectory."""
+    ik: bool,
+    ik_iters: int,
+    dataset_root: Path,
+) -> Path:
+    """Derive the velocities of one clip and write it as a motion."""
     base_pos = base_pos.astype(np.float32, copy=False)
     base_quat = base_quat.astype(np.float32, copy=False)
     joint_pos = joint_pos.astype(np.float32, copy=False)
-    return {
-        "base_pos": base_pos,
-        "base_quat": base_quat,
-        "base_lin_vel": finite_diff(base_pos, FPS),
-        "base_ang_vel": angular_velocity_from_quat(base_quat, FPS).astype(np.float32),
-        "joint_pos": joint_pos,
-        "joint_vel": finite_diff(joint_pos, FPS),
-    }
+    return write_motion(
+        dataset_root / LAYER_TRACKING / f"{ROBOT_TYPE}_lafan1_{clip}.rrd",
+        joint_names=joint_names,
+        fps=FPS,
+        base_pos=base_pos,
+        base_quat=base_quat,
+        base_lin_vel=finite_diff(base_pos, FPS),
+        base_ang_vel=angular_velocity_from_quat(base_quat, FPS).astype(np.float32),
+        joint_pos=joint_pos,
+        joint_vel=finite_diff(joint_pos, FPS),
+        task=LITE_TASK_NAME,
+        source={
+            "retargeted_from": "lvhaidong/LAFAN1_Retargeting_Dataset",
+            "clip": clip,
+            "source_robot": "unitree_g1",
+            "source_rate_hz": FPS,
+            "pipeline": "Berkeley-Humanoids/Lite-Motion-Retargeting",
+            "ik_refined": ik,
+            "ik_iters": ik_iters if ik else 0,
+        },
+        robot_type=ROBOT_TYPE,
+    )
 
 
 # ── Multiprocess worker (across-clip parallelism) ─────────────────────────────
@@ -407,27 +425,22 @@ def main(
     ik_iters: int = 15,
     workers: int = 1,
     validate_only: bool = False,
+    push: bool = False,
 ) -> None:
-    """Retarget LAFAN1 G1 clips to Lite and write a LeRobotDataset.
+    """Retarget LAFAN1 G1 clips to Lite, and write one .rrd motion per clip.
 
     Args:
-        repo_id: HF dataset repo id, recorded in dataset metadata.
-        clip: Optional regex to retarget only matching CSVs.
-        ik: If True, run step 2 IK to refine step 1. If False, output step 1 only.
-        ik_iters: Newton-step iterations per frame in step 2.
-        workers: Worker processes for across-clip parallelism. ``1`` (default)
-            keeps the sequential path with per-frame tqdm. ``-1`` uses every
-            CPU core. ``>1`` spawns a ``ProcessPoolExecutor`` and suppresses
-            inner tqdm bars to keep the terminal readable.
-        validate_only: Run on the first matching clip and stop without writing
-            the dataset. Prints the step-1 (and step-2 if ``ik=True``) EE error
-            table.
+        repo_id: The Hub dataset repo that ``--push`` uploads to.
+        clip: A regex. Retarget the clips whose name matches it.
+        ik: Refine step 1 with the step-2 IK. Set False to keep step 1 only.
+        ik_iters: Newton steps per frame in step 2.
+        workers: Processes to retarget clips in parallel. ``-1`` uses every core.
+        validate_only: Retarget the first matching clip, print the end-effector
+            error table, and write nothing.
+        push: Upload the motions to ``repo_id`` after the last clip.
     """
     if workers == -1:
         workers = os.cpu_count() or 1
-    # Each save_episode runs an HFDataset.map pass that prints its own bar
-    # — 218 of those interleave badly with our outer clip bar.
-    os.environ.setdefault("HF_DATASETS_DISABLE_PROGRESS_BARS", "1")
 
     csvs = sorted((LAFAN_ROOT / "g1").glob("*.csv"))
     if clip is not None:
@@ -469,33 +482,18 @@ def main(
             validate_ee_tracking(motion, step2, g1_model, lite_model, lite_joint_addrs)
         return
 
-    from lerobot.datasets import LeRobotDataset  # deferred: heavy import
-
-    if BUILD_ROOT.exists():
-        shutil.rmtree(BUILD_ROOT)
-    dataset = LeRobotDataset.create(
-        repo_id=repo_id,
-        fps=FPS,
-        features=dataset_features(joint_count=len(lite_jnames)),
-        root=BUILD_ROOT,
-        robot_type="lite",
-        use_videos=False,
-    )
-
-    def _write_clip(base_pos: np.ndarray, base_quat: np.ndarray, joint_pos: np.ndarray) -> None:
-        records = _frame_records(base_pos, base_quat, joint_pos)
-        for t in range(records["base_pos"].shape[0]):
-            dataset.add_frame({"task": LITE_TASK_NAME, **{k: v[t] for k, v in records.items()}})
-        dataset.save_episode()
-
+    written = []
     if workers > 1:
         args_list = [(str(p), bool(ik), int(ik_iters)) for p in csvs]
         with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init) as executor:
-            for base_pos, base_quat, joint_pos in tqdm(
-                executor.map(_worker_retarget, args_list, chunksize=1),
+            for csv_path, (base_pos, base_quat, joint_pos) in tqdm(
+                zip(csvs, executor.map(_worker_retarget, args_list, chunksize=1)),
                 total=len(csvs), desc=f"Clips (workers={workers})", unit="clip",
             ):
-                _write_clip(base_pos, base_quat, joint_pos)
+                written.append(write_clip(
+                    csv_path.stem, lite_jnames, base_pos, base_quat, joint_pos,
+                    ik, ik_iters, DATASET_ROOT,
+                ))
     else:
         for csv_path in tqdm(csvs, desc="Clips", unit="clip"):
             motion = load_lafan_csv(csv_path)
@@ -505,18 +503,27 @@ def main(
                 joint_pos = step2_ik_refine(
                     motion, joint_pos, g1_model, lite_model, lite_joint_addrs, iters=ik_iters,
                 )
-            _write_clip(step1["base_pos"], step1["base_quat"], joint_pos)
+            written.append(write_clip(
+                csv_path.stem, lite_jnames, step1["base_pos"], step1["base_quat"],
+                joint_pos, ik, ik_iters, DATASET_ROOT,
+            ))
 
-    dataset.finalize()
-    for sub in ("meta", "data"):
-        src = BUILD_ROOT / sub
-        if src.exists():
-            dst = REPO_ROOT / sub
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.move(str(src), str(dst))
-    shutil.rmtree(BUILD_ROOT, ignore_errors=True)
-    print(f"\nWrote dataset to {REPO_ROOT} ({len(csvs)} episodes)")
+    total_mb = sum(p.stat().st_size for p in written) / 1e6
+    print(f"\nWrote {len(written)} motions to {DATASET_ROOT / LAYER_TRACKING} "
+          f"({total_mb:.1f} MB)")
+
+    if push:
+        from huggingface_hub import HfApi  # deferred: only the upload needs it
+
+        HfApi().upload_folder(
+            folder_path=str(DATASET_ROOT),
+            path_in_repo=".",
+            repo_id=repo_id,
+            repo_type="dataset",
+            allow_patterns=["*.rrd"],
+            commit_message=f"Retarget {len(written)} LAFAN1 clips",
+        )
+        print(f"Pushed to {repo_id}")
 
 
 if __name__ == "__main__":

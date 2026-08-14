@@ -1,41 +1,77 @@
 # Lite Motion Retargeting
 
 Retargets the [LAFAN1][lafan1] motion capture set from the Unitree G1 to the
-Berkeley Lite humanoid.
-
-These scripts produced the 40 LAFAN1 clips in
-`Berkeley-Humanoids/Lite-Motion-Tracking-Dataset`. They lived in that dataset
-repo until now. Code belongs in a code repo, so they moved here, and the dataset
-repo keeps only motions.
+Berkeley Lite humanoid. One clip becomes one Rerun `.rrd` motion in
+[`Berkeley-Humanoids/Lite-Motion-Tracking-Dataset`][dataset], which
+[Lite-Motion-Tracking][training] then trains against.
 
 ## Pipeline
 
-Four scripts under `scripts/`, run in order:
+Each clip goes through two steps:
 
-1. **`download_lafan.py`** — pulls the G1 subset of [`lvhaidong/LAFAN1_Retargeting_Dataset`][lafan1]
-   into `.cache/lafan1_g1/`.
-2. **`retarget.py`** — a direct G1 → Lite joint remap (the sign and offset table
-   in `common.G1_TO_LITE`), then per-frame `mink` IK on both feet and both hands.
-3. **`visualize.py`** — a viser viewer that draws Lite solid over the source G1 as
-   a ghost.
-4. **`push_to_hub.py`** — uploads the result.
+1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
+   `common.G1_TO_LITE`. A constant shift of the pelvis height puts the feet of
+   Lite on the ground.
+2. **IK refinement.** Per-frame [`mink`][mink] IK moves the result toward the
+   pelvis-local end-effector poses of the G1: both feet and both hands, position
+   and orientation. A per-DOF posture cost holds the solution near step 1, so the
+   step adjusts the pose and does not rearrange it.
 
 ```bash
 uv sync
-uv run scripts/download_lafan.py
-uv run scripts/retarget.py                      # every clip
-uv run scripts/retarget.py --clip 'walk1_subject1'   # one clip
+uv run scripts/download_lafan.py              # G1 source clips -> .cache/
+uv run scripts/retarget.py --workers -1       # every clip, every core
+uv run scripts/visualize.py                   # inspect the result
+uv run scripts/retarget.py --workers -1 --push  # retarget, then upload
 ```
 
-## Output format
+## Scripts
 
-`retarget.py` writes a **LeRobot v3 dataset**, which is the format the training
-side has since replaced with Rerun `.rrd`. The bridge is
-`scripts/motions/import_lerobot_motion.py` in
-[Lite-Motion-Tracking][training], which converts an episode to a `.rrd` motion.
+| Script | What it does |
+|---|---|
+| `download_lafan.py` | Pulls the G1 subset of the LAFAN1 dataset into `.cache/lafan1_g1/`. |
+| `retarget.py` | Runs both steps and writes `dataset/tracking/lite_pro_lafan1_<clip>.rrd`. `--push` uploads them. |
+| `visualize.py` | A viser viewer. Draws Lite solid with the source G1 over it as a ghost. |
+| `rrd.py` | Reads and writes the motion file. |
 
-Writing `.rrd` directly from `retarget.py` would drop that hop. It is the obvious
-next change here, and nothing depends on the LeRobot output except that importer.
+### `retarget.py` flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--clip <regex>` | none | Retarget the clips whose name matches. |
+| `--validate-only` | off | Print the end-effector error table, and write nothing. |
+| `--no-ik` | off | Keep step 1 only. |
+| `--ik-iters N` | 15 | Newton steps per frame in step 2. |
+| `--workers N` | 1 | Processes to run clips in parallel. `-1` uses every core. |
+| `--push` | off | Upload the motions after the last clip. |
+| `--repo-id <id>` | the dataset above | The Hub repo to upload to. |
+
+`--push` needs a token with write access to the namespace:
+
+```bash
+hf auth login          # or: export HF_TOKEN=hf_...
+```
+
+## The motion file
+
+A motion is a Rerun `.rrd` file that holds the base pose, the joint positions and
+velocities, and the joint names, on a `frame` timeline. `scripts/rrd.py` reads and
+writes it, and `rerun <file>.rrd` opens it.
+
+The format belongs to the training repo, at
+`lite_motion_tracking/tasks/tracking/reference_motion.py`. `rrd.py` repeats its
+constants instead of importing them, because that package pulls mjlab and torch.
+Keep the two equal.
+
+## The robot model
+
+`retarget.py` loads `robots/lite_pro/mjcf/lite_pro.xml` from `robot-assets`, the
+same asset package and pin that the training repo uses, so both read one MJCF.
+
+The result depends on that model: the pelvis shift comes from where the feet of
+Lite are, and the IK solves against its kinematics. A new asset version therefore
+gives a new motion. The 40 clips published before 2026-08 came from an earlier
+model, and they sit 40 mm lower than this pipeline now writes.
 
 ## Licence
 
@@ -43,4 +79,6 @@ The retargeted motion inherits **CC BY-NC 4.0** from LAFAN1. Non-commercial use
 only.
 
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
+[dataset]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-Motion-Tracking-Dataset
 [training]: https://github.com/Berkeley-Humanoids/Lite-Motion-Tracking
+[mink]: https://github.com/kevinzakka/mink

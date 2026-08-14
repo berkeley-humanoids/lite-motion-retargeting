@@ -121,10 +121,10 @@ G1_TO_LITE: dict[str, tuple[str, int, float]] = {
 
 
 def load_lite_model() -> mujoco.MjModel:
-    """Load the Berkeley Lite humanoid MJCF via the Berkeley-Humanoids package."""
-    from robot_descriptions import load_asset
+    """Load the Lite Pro MJCF, the same asset that the training repo loads."""
+    from robot_assets import load
 
-    return mujoco.MjModel.from_xml_path(str(load_asset("robots/lite/mjcf/lite.xml")))
+    return mujoco.MjModel.from_xml_path(str(load("robots/lite_pro/mjcf/lite_pro.xml")))
 
 
 def load_g1_model(lafan_root: Path) -> mujoco.MjModel:
@@ -163,10 +163,11 @@ def body_id(model: mujoco.MjModel, body_name: str) -> int:
 
 
 def lite_joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
-    """All hinge joint names in the Lite model in MuJoCo's depth-first order.
+    """All hinge joint names of the Lite model, in the depth-first order of MuJoCo.
 
-    Skips the free joint at index 0 if present. The result is the single
-    source of truth for the LeRobotDataset ``joint_pos`` column order.
+    Skips the free joint at index 0 when the model has one. The result gives the
+    order of the ``joint_pos`` columns, and the motion file stores it, so a
+    loader maps a column to a robot joint by name.
     """
     names: list[str] = []
     for jid in range(model.njnt):
@@ -263,22 +264,3 @@ def _axis_angle_from_quat(q: np.ndarray) -> np.ndarray:
     axis = np.zeros_like(xyz)
     axis[safe] = xyz[safe] / sin_half[safe, None]
     return axis * angle[..., None]
-
-
-# ── LeRobotDataset feature schema ─────────────────────────────────────────────
-
-
-def dataset_features(joint_count: int) -> dict:
-    """LeRobotDataset feature schema for the retargeted Lite motion dataset.
-
-    Six flat fields, scalar-first WXYZ for the base orientation, no ``action``
-    (this is a kinematic reference).
-    """
-    return {
-        "base_pos": {"dtype": "float32", "shape": (3,), "names": ["x", "y", "z"]},
-        "base_quat": {"dtype": "float32", "shape": (4,), "names": ["w", "x", "y", "z"]},
-        "base_lin_vel": {"dtype": "float32", "shape": (3,), "names": ["vx", "vy", "vz"]},
-        "base_ang_vel": {"dtype": "float32", "shape": (3,), "names": ["wx", "wy", "wz"]},
-        "joint_pos": {"dtype": "float32", "shape": (joint_count,), "names": None},
-        "joint_vel": {"dtype": "float32", "shape": (joint_count,), "names": None},
-    }

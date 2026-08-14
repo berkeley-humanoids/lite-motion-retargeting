@@ -1,0 +1,17 @@
+[project]
+name = "lite-motion-tracking-dataset"
+version = "0.1.0"
+description = "LAFAN1 motions retargeted from Unitree G1 to the Berkeley Lite humanoid (HuggingFace LeRobotDataset)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "huggingface_hub>=0.24",
+    "lerobot>=0.2",
+    "mink>=0.0.7",
+    "mujoco>=3.2",
+    "numpy>=1.26",
+    "robot_descriptions @ git+https://github.com/Berkeley-Humanoids/Robot-Descriptions.git",
+    "tqdm>=4.66",
+    "tyro>=0.9",
+    "viser>=0.2.10",
+]

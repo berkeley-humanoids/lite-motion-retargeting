@@ -70,8 +70,14 @@ same asset package and pin that the training repo uses, so both read one MJCF.
 
 The result depends on that model: the pelvis shift comes from where the feet of
 Lite are, and the IK solves against its kinematics. A new asset version therefore
-gives a new motion. The 40 clips published before 2026-08 came from an earlier
-model, and they sit 40 mm lower than this pipeline now writes.
+gives a new motion.
+
+The 40 clips published before 2026-08-13 came from an earlier model, and their
+pelvis sat 40 mm **above** what this asset needs, so the feet of the reference
+floated. The clips on the Hub now come from the model above. The regeneration
+moved the pelvis down by 40.00 mm on every clip and left x and y untouched, and
+it changed the joints that the IK solves for. The direct remap of step 1 did not
+move: the median joint change is 0.
 
 ## Licence
 

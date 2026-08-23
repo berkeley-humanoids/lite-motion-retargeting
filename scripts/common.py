@@ -18,16 +18,27 @@ import numpy as np
 
 FPS: int = 30
 LAFAN_REPO_ID: str = "lvhaidong/LAFAN1_Retargeting_Dataset"
-LITE_DATASET_REPO_ID: str = "Berkeley-Humanoids/Lite-Motion-Tracking-Dataset"
-LITE_TASK_NAME: str = "track_lafan1"
+DATASET_REPO_ID: str = "Berkeley-Humanoids/Lite-LAFAN1-Dataset"
 
-# End-effector body names — Lite (matches the MJCF) and the G1 URDF after MuJoCo
-# import (the ``*_rubber_hand`` link is fixed-jointed and fuses into
-# ``*_wrist_yaw_link``, which is the last named body in each arm chain).
-LITE_FOOT_BODIES: tuple[str, str] = ("left_foot", "right_foot")
-LITE_HAND_BODIES: tuple[str, str] = ("left_hand", "right_hand")
-G1_FOOT_BODIES: tuple[str, str] = ("left_ankle_roll_link", "right_ankle_roll_link")
-G1_HAND_BODIES: tuple[str, str] = ("left_wrist_yaw_link", "right_wrist_yaw_link")
+#: The body both robots are rooted at. Neither model gives it a joint, so it is the
+#: frame forward kinematics runs in rather than a body of the result, and the base
+#: trajectory of the motion is its world pose.
+BASE_BODY: str = "pelvis"
+
+#: Lite link -> the G1 link whose pose the IK aims it at. The Lite names come from the
+#: MJCF. The G1 names come from its URDF after MuJoCo import, where the fixed-jointed
+#: ``*_rubber_hand`` link fuses into ``*_wrist_yaw_link``, the last named body of each
+#: arm chain.
+IK_BODY_PAIRS: dict[str, str] = {
+    "left_foot": "left_ankle_roll_link",
+    "right_foot": "right_ankle_roll_link",
+    "left_hand": "left_wrist_yaw_link",
+    "right_hand": "right_wrist_yaw_link",
+}
+
+#: The bodies each layer of a motion stores, base first.
+ROBOT_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS)
+REFERENCE_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS.values())
 
 LAFAN_G1_URDF_RELPATH: str = "robot_description/g1/g1_29dof_rev_1_0.urdf"
 
@@ -127,6 +138,17 @@ def load_lite_model() -> mujoco.MjModel:
     return mujoco.MjModel.from_xml_path(str(load("robots/lite_pro/mjcf/lite_pro.xml")))
 
 
+def lite_urdf_path() -> Path:
+    """Path to the Lite Pro URDF, whose geometry goes into the robot layer.
+
+    The MJCF drives the retarget and this URDF only draws it, so the two must describe
+    one robot. They come from one asset package, and their joint and link names match.
+    """
+    from robot_assets import load
+
+    return Path(load("robots/lite_pro/urdf/lite_pro.urdf"))
+
+
 def load_g1_model(lafan_root: Path) -> mujoco.MjModel:
     """Load the Unitree G1 URDF bundled in the downloaded LAFAN1 dataset.
 
@@ -213,54 +235,48 @@ def load_lafan_csv(path: Path) -> dict[str, np.ndarray]:
     }
 
 
-# ── Derivatives ───────────────────────────────────────────────────────────────
+# ── Forward kinematics ────────────────────────────────────────────────────────
 
 
-def finite_diff(x: np.ndarray, fps: int) -> np.ndarray:
-    """Central finite difference along axis 0."""
-    return np.gradient(x, 1.0 / fps, axis=0).astype(x.dtype, copy=False)
+def world_poses(
+    model: mujoco.MjModel,
+    joint_addrs: np.ndarray,
+    joint_pos: np.ndarray,
+    base_pos: np.ndarray,
+    base_quat: np.ndarray,
+    body_names: tuple[str, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """World pose of :data:`BASE_BODY`, then of each of ``body_names``, per frame.
 
+    The base leads the arrays because it is the frame the kinematics runs in and not a
+    body of the result: the Lite MJCF welds its pelvis to the origin, and MuJoCo fuses
+    the jointless root link of the G1 URDF into ``world``. Every pose a pass returns is
+    therefore pelvis-local, and the base trajectory ``(base_pos, base_quat)``, wxyz,
+    composes straight onto it.
 
-def angular_velocity_from_quat(q_wxyz: np.ndarray, fps: int) -> np.ndarray:
-    """World-frame angular velocity (rad/s) from a sequence of WXYZ quaternions.
+    ``joint_addrs`` gives the ``qpos`` address of each column of ``joint_pos``. A joint
+    of the model that no column addresses keeps its model default.
 
-    Uses the central stencil ``omega = axis_angle(q[t+1] * q[t-1]^-1) / 2dt``;
-    endpoints are repeated to keep length T.
+    Returns ``(T, 1 + NB, 3)`` positions and ``(T, 1 + NB, 4)`` wxyz rotations.
     """
-    dt = 1.0 / fps
-    rel = _quat_mul(q_wxyz[2:], _quat_conj(q_wxyz[:-2]))
-    omega_mid = _axis_angle_from_quat(rel) / (2.0 * dt)
-    omega = np.empty((q_wxyz.shape[0], 3), dtype=q_wxyz.dtype)
-    omega[1:-1] = omega_mid
-    omega[0] = omega_mid[0]
-    omega[-1] = omega_mid[-1]
-    return omega
+    data = mujoco.MjData(model)
+    body_ids = [body_id(model, name) for name in body_names]
+    base_pos = np.asarray(base_pos, dtype=np.float64)
+    base_quat = np.asarray(base_quat, dtype=np.float64)
 
+    frames = joint_pos.shape[0]
+    pos = np.empty((frames, 1 + len(body_ids), 3), dtype=np.float32)
+    quat = np.empty((frames, 1 + len(body_ids), 4), dtype=np.float32)
+    pos[:, 0], quat[:, 0] = base_pos, base_quat
+    world_pos, world_quat = np.empty(3), np.empty(4)
 
-def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    aw, ax, ay, az = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
-    bw, bx, by, bz = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
-    out = np.empty_like(a)
-    out[..., 0] = aw * bw - ax * bx - ay * by - az * bz
-    out[..., 1] = aw * bx + ax * bw + ay * bz - az * by
-    out[..., 2] = aw * by - ax * bz + ay * bw + az * bx
-    out[..., 3] = aw * bz + ax * by - ay * bx + az * bw
-    return out
-
-
-def _quat_conj(q: np.ndarray) -> np.ndarray:
-    out = q.copy()
-    out[..., 1:] *= -1.0
-    return out
-
-
-def _axis_angle_from_quat(q: np.ndarray) -> np.ndarray:
-    """WXYZ quaternion → rotation vector ``axis * angle``, shape ``(..., 3)``."""
-    w = np.clip(q[..., 0], -1.0, 1.0)
-    xyz = q[..., 1:]
-    sin_half = np.linalg.norm(xyz, axis=-1)
-    angle = 2.0 * np.arctan2(sin_half, w)
-    safe = sin_half > 1e-8
-    axis = np.zeros_like(xyz)
-    axis[safe] = xyz[safe] / sin_half[safe, None]
-    return axis * angle[..., None]
+    for t in range(frames):
+        data.qpos[joint_addrs] = joint_pos[t]
+        mujoco.mj_kinematics(model, data)
+        for k, bid in enumerate(body_ids, start=1):
+            mujoco.mju_mulPose(
+                world_pos, world_quat,
+                base_pos[t], base_quat[t], data.xpos[bid], data.xquat[bid],
+            )
+            pos[t, k], quat[t, k] = world_pos, world_quat
+    return pos, quat

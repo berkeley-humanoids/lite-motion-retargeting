@@ -1,90 +1,66 @@
 # Lite Motion Retargeting
 
-Retargets the [LAFAN1][lafan1] motion capture set from the Unitree G1 to the
-Berkeley Lite humanoid. One clip becomes one Rerun `.rrd` motion in
-[`Berkeley-Humanoids/Lite-Motion-Tracking-Dataset`][dataset], which
-[Lite-Motion-Tracking][training] then trains against.
+Retargets the [LAFAN1](https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset)
+motion capture set from the Unitree G1 to the Berkeley Lite humanoid. One clip
+becomes one layered [Rerun](https://rerun.io) motion in
+[`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset], which you can
+[open in a browser][viewer].
 
-## Pipeline
-
-Each clip goes through two steps:
-
-1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
-   `common.G1_TO_LITE`. A constant shift of the pelvis height puts the feet of
-   Lite on the ground.
-2. **IK refinement.** Per-frame [`mink`][mink] IK moves the result toward the
-   pelvis-local end-effector poses of the G1: both feet and both hands, position
-   and orientation. A per-DOF posture cost holds the solution near step 1, so the
-   step adjusts the pose and does not rearrange it.
+## Use
 
 ```bash
 uv sync
-uv run scripts/download_lafan.py              # G1 source clips -> .cache/
-uv run scripts/retarget.py --workers -1       # every clip, every core
-uv run scripts/visualize.py                   # inspect the result
-uv run scripts/retarget.py --workers -1 --push  # retarget, then upload
+uv run scripts/download_lafan.py         # G1 clips -> .cache/
+uv run scripts/retarget.py --workers -1  # every clip, every core
+uv run rerun dataset/*/lafan1_walk1_subject1.rrd dataset/blueprints/lite_pro.rbl
+uv run scripts/publish.py --clear        # upload to the Hub
 ```
 
-## Scripts
+To write to the Hub, run `hf auth login` or set `HF_TOKEN`.
 
 | Script | What it does |
 |---|---|
-| `download_lafan.py` | Pulls the G1 subset of the LAFAN1 dataset into `.cache/lafan1_g1/`. |
-| `retarget.py` | Runs both steps and writes `dataset/tracking/lite_pro_lafan1_<clip>.rrd`. `--push` uploads them. |
-| `visualize.py` | A viser viewer. Draws Lite solid with the source G1 over it as a ghost. |
-| `rrd.py` | Reads and writes the motion file. |
+| `download_lafan.py` | Downloads the G1 clips of LAFAN1 into `.cache/lafan1_g1/`. |
+| `retarget.py` | Retargets each clip and writes its two layers under `dataset/`. |
+| `store.py` | Defines the file format. |
+| `publish.py` | Fills the motion index of `DATASET_CARD.md`, then uploads both to the Hub. |
+| `common.py` | The joint table, the model loaders, the CSV reader, and forward kinematics. |
 
-### `retarget.py` flags
+`retarget.py` takes `--clip <regex>`, `--no-ik`, `--ik-iters N`, `--workers N`, and
+`--validate-only`, which prints the end-effector error table and writes nothing.
+`publish.py` takes `--dry-run`, `--repo-id <id>`, and `--clear`, which deletes every
+file in the Hub repo that this store does not replace.
 
-| Flag | Default | Effect |
-|---|---|---|
-| `--clip <regex>` | none | Retarget the clips whose name matches. |
-| `--validate-only` | off | Print the end-effector error table, and write nothing. |
-| `--no-ik` | off | Keep step 1 only. |
-| `--ik-iters N` | 15 | Newton steps per frame in step 2. |
-| `--workers N` | 1 | Processes to run clips in parallel. `-1` uses every core. |
-| `--push` | off | Upload the motions after the last clip. |
-| `--repo-id <id>` | the dataset above | The Hub repo to upload to. |
+## How a clip is retargeted
 
-`--push` needs a token with write access to the namespace:
+1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
+   `common.G1_TO_LITE`. A constant shift of the pelvis height puts the feet of Lite
+   on the ground.
+2. **IK refinement.** Per-frame [`mink`](https://github.com/kevinzakka/mink) IK moves
+   the result toward the pelvis-local pose of both feet and both hands of the G1,
+   position and orientation. A per-DOF posture cost holds the solution near step 1,
+   so the step adjusts the pose and does not rearrange it.
 
-```bash
-hf auth login          # or: export HF_TOKEN=hf_...
-```
+The IK solves against the Lite Pro MJCF of `robot-assets`, and the robot layer draws
+the URDF of the same package. A new asset version therefore gives new motions, and
+`retarget.py` prints the pelvis shift it measured so that such a change is visible.
 
-## The motion file
+## The file format
 
-A motion is a Rerun `.rrd` file that holds the base pose, the joint positions and
-velocities, and the joint names, on a `frame` timeline. `scripts/rrd.py` reads and
-writes it, and `rerun <file>.rrd` opens it.
+`store.py` writes `dataset/` as one directory per layer: `reference/` for the G1
+bodies the IK aims at, `lite_pro/` for the joints it reached, and `blueprints/` for
+the viewer layout. `DATASET_CARD.md` documents that store, and `store.py` documents
+every entity path.
 
-The format belongs to the training repo, at
-`lite_motion_tracking/tasks/tracking/reference_motion.py`. `rrd.py` repeats its
-constants instead of importing them, because that package pulls mjlab and torch.
-Keep the two equal.
+`store.py` is the only module that writes Rerun data, and it uses `rerun-sdk` alone.
+The layout on disk matches the motion store of
+[MikuMotionTools](https://github.com/T-K-233/MikuMotionTools), so its `MotionStore`
+reads these files.
 
-## The robot model
+The training repository,
+[Lite-Motion-Tracking](https://github.com/Berkeley-Humanoids/Lite-Motion-Tracking),
+still reads the older single-layer `tracking/*.rrd`. It needs a reader for this store
+before it can train on these motions.
 
-`retarget.py` loads `robots/lite_pro/mjcf/lite_pro.xml` from `robot-assets`, the
-same asset package and pin that the training repo uses, so both read one MJCF.
-
-The result depends on that model: the pelvis shift comes from where the feet of
-Lite are, and the IK solves against its kinematics. A new asset version therefore
-gives a new motion.
-
-The 40 clips published before 2026-08-13 came from an earlier model, and their
-pelvis sat 40 mm **above** what this asset needs, so the feet of the reference
-floated. The clips on the Hub now come from the model above. The regeneration
-moved the pelvis down by 40.00 mm on every clip and left x and y untouched, and
-it changed the joints that the IK solves for. The direct remap of step 1 did not
-move: the median joint change is 0.
-
-## Licence
-
-The retargeted motion inherits **CC BY-NC 4.0** from LAFAN1. Non-commercial use
-only.
-
-[lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
-[dataset]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-Motion-Tracking-Dataset
-[training]: https://github.com/Berkeley-Humanoids/Lite-Motion-Tracking
-[mink]: https://github.com/kevinzakka/mink
+[dataset]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-LAFAN1-Dataset
+[viewer]: https://rerun.io/viewer?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2FBerkeley-Humanoids%2FLite-LAFAN1-Dataset%2Fresolve%2Fmain%2Flite_pro%2Flafan1_dance1_subject1.rrd

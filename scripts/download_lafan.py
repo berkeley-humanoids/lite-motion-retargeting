@@ -1,7 +1,7 @@
 """Download the LAFAN1 G1 subset from the Hugging Face Hub.
 
-Pulls only the G1 motion CSVs, the G1 URDF + meshes (needed by
-``visualize.py`` to render the source ghost), and dataset metadata.
+Pulls only the G1 motion CSVs, the G1 URDF and its meshes (which ``retarget.py``
+compiles to run the kinematics of the source), and dataset metadata.
 
 Usage:
     uv run scripts/download_lafan.py

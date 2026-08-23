@@ -19,7 +19,8 @@ viewer: false
 # Lite LAFAN1 Dataset
 
 40 [LAFAN1][lafan1] clips at 50 Hz, retargeted from the Unitree G1 to the Berkeley Lite
-Pro humanoid by [Lite-Motion-Retargeting][retarget]. One motion is one
+Pro humanoid by [Lite-Motion-Retargeting][retarget], with the 30 Hz source kept beside
+them. One motion is one
 [Rerun](https://rerun.io) recording. [Open one in your browser][viewer], with no
 install. The [table below](#motions) links every motion.
 
@@ -41,19 +42,25 @@ opens any set of them as one recording.
 
 | Path | What it holds |
 |---|---|
-| `reference/<motion>.rrd` | The G1 bodies the retarget aims at: a world pose and velocity per body, and no joints. |
-| `lite_pro/<motion>.rrd` | What the retarget reached: joint positions and velocities, the same bodies, and the URDF geometry that draws them. |
+| `base/<motion>.rrd` | The source clip as published, at 30 Hz: the 29 G1 joints, and the world poses they put its bodies at. Provenance, so a motion can be derived again without the upstream dataset. |
+| `lite_pro/<motion>.rrd` | Everything the robot needs, at 50 Hz: the retargeted joints, the goal its bodies track, and the URDF geometry that draws it. |
 | `blueprints/lite_pro.rbl` | The viewer layout. |
 
-Both layers carry the pelvis, both feet, and both hands. The robot layer names them after
-the links of Lite, the reference layer after the links of the G1, and the
-`reference_body_names` property records the pairing. The gap between the two is the error
-of the retarget, frame by frame.
+The robot layer is self-contained. Its joints reset the robot, and its body poses are the
+**goal**, in the frame convention of the Lite links, so a tracking reward compares them
+against the robot directly. `source_body_names` records which G1 link each goal came
+from. The layer stores no reached pose, because that is the forward kinematics of the
+joints beside it, and the `/lite_pro/tf` chain already draws the robot there. The gap
+between the robot and its goal triads is the error of the retarget, frame by frame.
+
+Both layers carry the pelvis, both feet, and both hands, the robot layer under the Lite
+link names and the base layer under the G1 ones.
 
 Every array is world frame, in metres and radians, and a rotation is `xyzw`. A velocity
-is the backward difference against the frame before it, so frame 0 holds zero.
-`scripts/store.py` of [Lite-Motion-Retargeting][retarget] lists every entity path and
-property.
+is the backward difference against the frame before it, so frame 0 holds zero. Every
+column carries a `frame` index and a `time` in seconds. The two layers run at different
+rates, so `time` is what lines them up. `scripts/store.py` of
+[Lite-Motion-Retargeting][retarget] lists every entity path and property.
 
 ## Motions
 

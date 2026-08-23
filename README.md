@@ -52,10 +52,16 @@ the URDF of the same package. A new asset version therefore gives new motions, a
 
 ## The file format
 
-`store.py` writes `dataset/` as one directory per layer: `reference/` for the G1
-bodies the IK aims at, `lite_pro/` for the joints it reached, and `blueprints/` for
-the viewer layout. `DATASET_CARD.md` documents that store, and `store.py` documents
-every entity path.
+`store.py` writes `dataset/` as one directory per layer: `base/` for the source clip
+as published at 30 Hz, `lite_pro/` for the 50 Hz retarget, and `blueprints/` for the
+viewer layout. `DATASET_CARD.md` documents that store, and `store.py` documents every
+entity path.
+
+The robot layer is what training and deployment read, and it is self-contained: its
+joints reset the robot, and its body poses are the goal, turned into the frame
+convention of the Lite links so a reward compares them against the robot directly.
+It stores no reached pose, because that is the forward kinematics of the joints
+beside it.
 
 `store.py` is the only module that writes Rerun data, and it uses `rerun-sdk` alone.
 The layout on disk matches the motion store of

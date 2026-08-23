@@ -43,9 +43,10 @@ IK_BODY_PAIRS: dict[str, str] = {
     "right_hand": "right_wrist_yaw_link",
 }
 
-#: The bodies each layer of a motion stores, base first.
+#: The bodies each layer of a motion stores, the root body first. The robot layer names
+#: them after the links of Lite, the base layer after the links of the G1.
 ROBOT_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS)
-REFERENCE_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS.values())
+SOURCE_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS.values())
 
 LAFAN_G1_URDF_RELPATH: str = "robot_description/g1/g1_29dof_rev_1_0.urdf"
 
@@ -279,6 +280,18 @@ def _interp(t_dst: np.ndarray, t_src: np.ndarray, values: np.ndarray) -> np.ndar
     return np.stack(
         [np.interp(t_dst, t_src, values[:, k]) for k in range(values.shape[1])], axis=1
     ).astype(np.float32)
+
+
+def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton product of two wxyz quaternion arrays, broadcast over leading axes."""
+    aw, ax, ay, az = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+    bw, bx, by, bz = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
+    return np.stack([
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ], axis=-1)
 
 
 # ── Forward kinematics ────────────────────────────────────────────────────────

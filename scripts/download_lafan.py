@@ -18,7 +18,7 @@ import tyro
 from huggingface_hub import snapshot_download
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import G1_LAFAN_JOINT_NAMES, LAFAN_REPO_ID  # noqa: E402
+from common import G1_LAFAN_JOINT_NAMES, LAFAN_REPO_ID, SOURCE_FPS  # noqa: E402
 
 CACHE_ROOT: Path = Path(__file__).resolve().parent.parent / ".cache" / "lafan1_g1"
 ALLOW_PATTERNS: list[str] = [
@@ -62,7 +62,8 @@ def main(clip: str | None = None, force: bool = False) -> None:
         )
     print(f"LAFAN1 G1 subset → {local_path}")
     print(f"  csvs   : {len(csvs)}")
-    print(f"  sample : {csvs[0].name}  ({raw.shape[0]} frames @ 30 FPS, {raw.shape[1]} cols)")
+    print(f"  sample : {csvs[0].name}  ({raw.shape[0]} frames @ {SOURCE_FPS} FPS, "
+          f"{raw.shape[1]} cols)")
 
 
 if __name__ == "__main__":

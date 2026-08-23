@@ -18,7 +18,7 @@ viewer: false
 
 # Lite LAFAN1 Dataset
 
-40 [LAFAN1][lafan1] clips at 30 Hz, retargeted from the Unitree G1 to the Berkeley Lite
+40 [LAFAN1][lafan1] clips at 50 Hz, retargeted from the Unitree G1 to the Berkeley Lite
 Pro humanoid by [Lite-Motion-Retargeting][retarget]. One motion is one
 [Rerun](https://rerun.io) recording. [Open one in your browser][viewer], with no
 install. The [table below](#motions) links every motion.
@@ -62,9 +62,9 @@ property.
 ## Source
 
 The G1 subset of [`lvhaidong/LAFAN1_Retargeting_Dataset`][lafan1] is LAFAN1 already
-retargeted to a 29-DoF Unitree G1. [Lite-Motion-Retargeting][retarget] takes it to Lite
-Pro with a per-joint remap and a per-frame IK, and documents both. The result depends on
-the Lite Pro asset, so a new version of
+retargeted to a 29-DoF Unitree G1, at 30 Hz. [Lite-Motion-Retargeting][retarget]
+resamples it to 50 Hz and takes it to Lite Pro with a per-joint remap and a per-frame IK,
+and documents both. The result depends on the Lite Pro asset, so a new version of
 [Lite-Description](https://github.com/Berkeley-Humanoids/Lite-Description) gives new
 motions.
 

@@ -41,6 +41,7 @@ from common import (  # noqa: E402
     IK_BODY_PAIRS,
     REFERENCE_BODIES,
     ROBOT_BODIES,
+    SOURCE_FPS,
     body_id,
     joint_qpos_addr,
     lite_joint_names,
@@ -48,6 +49,7 @@ from common import (  # noqa: E402
     load_g1_model,
     load_lafan_csv,
     load_lite_model,
+    resample_motion,
     world_poses,
 )
 from store import write_blueprint, write_reference_layer, write_robot_layer  # noqa: E402
@@ -381,7 +383,7 @@ def retarget_clip(
     rest-frame conversion of :func:`_rest_frame_conversions` belongs to the solve and not
     to the source, so a reference triad sits at a fixed angle to the link it drives.
     """
-    motion = load_lafan_csv(Path(csv_path))
+    motion = resample_motion(load_lafan_csv(Path(csv_path)), SOURCE_FPS, FPS)
     step1 = step1_direct_remap(motion, models.joint_addrs, models.lite, models.z_offset)
     joint_pos = step1["joint_pos"]
     if do_ik:
@@ -459,9 +461,10 @@ def main(
         f"  {len(G1_TO_LITE)} joint pairs, {flipped} sign flips, "
         f"{nonzero} nonzero offsets, pelvis z-offset={models.z_offset * 1000:.2f} mm"
     )
+    print(f"  resampling {SOURCE_FPS} Hz -> {FPS} Hz")
 
     if validate_only:
-        motion = load_lafan_csv(csvs[0])
+        motion = resample_motion(load_lafan_csv(csvs[0]), SOURCE_FPS, FPS)
         step1 = step1_direct_remap(
             motion, models.joint_addrs, models.lite, models.z_offset
         )

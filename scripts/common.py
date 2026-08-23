@@ -13,10 +13,17 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from scipy.spatial.transform import Rotation, Slerp
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-FPS: int = 30
+#: The rate of the LAFAN1 CSVs.
+SOURCE_FPS: int = 30
+
+#: The rate a motion is written at, which is the control rate of the training
+#: environment. A motion at another rate would force the loader to interpolate.
+FPS: int = 50
+
 LAFAN_REPO_ID: str = "lvhaidong/LAFAN1_Retargeting_Dataset"
 DATASET_REPO_ID: str = "Berkeley-Humanoids/Lite-LAFAN1-Dataset"
 
@@ -44,7 +51,7 @@ LAFAN_G1_URDF_RELPATH: str = "robot_description/g1/g1_29dof_rev_1_0.urdf"
 
 # Authoritative LAFAN1 G1 CSV joint order. Every CSV row is
 # ``[base_x, base_y, base_z, base_qx, base_qy, base_qz, base_qw,
-#   *G1_LAFAN_JOINT_NAMES]`` at 30 FPS.
+#   *G1_LAFAN_JOINT_NAMES]`` at :data:`SOURCE_FPS`.
 G1_LAFAN_JOINT_NAMES: tuple[str, ...] = (
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
@@ -208,7 +215,7 @@ def lite_joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
 def load_lafan_csv(path: Path) -> dict[str, np.ndarray]:
     """Read one LAFAN1 G1 CSV into base pose + joint positions.
 
-    On-disk format: headerless, 30 FPS, ``[base_xyz(3), base_quat_xyzw(4),
+    On-disk format: headerless, :data:`SOURCE_FPS`, ``[base_xyz(3), base_quat_xyzw(4),
     joint_pos(29)]`` per row. Converts XYZW → WXYZ and flips quaternion sign
     so ``w >= 0``.
 
@@ -233,6 +240,45 @@ def load_lafan_csv(path: Path) -> dict[str, np.ndarray]:
         "base_quat_wxyz": base_quat,
         "g1_joint_pos": raw[:, 7:],
     }
+
+
+def resample_motion(
+    motion: dict[str, np.ndarray], src_fps: int, dst_fps: int
+) -> dict[str, np.ndarray]:
+    """Resample the output of :func:`load_lafan_csv` from ``src_fps`` onto ``dst_fps``.
+
+    The source is resampled, and not the retarget, so that the IK solves every frame
+    that reaches the file and the body poses stay the exact kinematics of the joints
+    beside them.
+
+    Positions and joint angles interpolate linearly, and the base rotation by slerp.
+
+    The output grid is uniform, because a motion declares one rate and a loader indexes
+    it by frame. The last output sample therefore lands within one output period of the
+    last input sample, and the clip keeps it from landing past it, which ``Slerp``
+    rejects.
+    """
+    frames = motion["base_pos"].shape[0]
+    if dst_fps == src_fps or frames < 2:
+        return motion
+
+    t_src = np.arange(frames) / src_fps
+    t_dst = np.clip(
+        np.arange(round(t_src[-1] * dst_fps) + 1) / dst_fps, 0.0, t_src[-1]
+    )
+    rotations = Slerp(t_src, Rotation.from_quat(motion["base_quat_wxyz"][:, [1, 2, 3, 0]]))
+    return {
+        "base_pos": _interp(t_dst, t_src, motion["base_pos"]),
+        "base_quat_wxyz": rotations(t_dst).as_quat().astype(np.float32)[:, [3, 0, 1, 2]],
+        "g1_joint_pos": _interp(t_dst, t_src, motion["g1_joint_pos"]),
+    }
+
+
+def _interp(t_dst: np.ndarray, t_src: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Interpolate each column of a ``(T, N)`` array onto ``t_dst``."""
+    return np.stack(
+        [np.interp(t_dst, t_src, values[:, k]) for k in range(values.shape[1])], axis=1
+    ).astype(np.float32)
 
 
 # ── Forward kinematics ────────────────────────────────────────────────────────

@@ -11,6 +11,8 @@ dependencies = [
     "numpy>=1.26",
     "rerun-sdk>=0.36",
     "robot-assets @ git+https://github.com/Berkeley-Humanoids/Lite-Description.git",
+    # Slerp, for the resample of the base rotation onto the output rate.
+    "scipy>=1.11",
     "tqdm>=4.66",
     "tyro>=0.9",
 ]

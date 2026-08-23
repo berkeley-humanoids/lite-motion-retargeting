@@ -33,6 +33,11 @@ file in the Hub repo that this store does not replace.
 
 ## How a clip is retargeted
 
+The source is 30 Hz and a motion is written at 50 Hz, the control rate of the
+training environment. `retarget.py` resamples the source before it does anything
+else, so the IK solves every frame that reaches the file, and the body poses stay
+the exact kinematics of the joints beside them.
+
 1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
    `common.G1_TO_LITE`. A constant shift of the pelvis height puts the feet of Lite
    on the ground.

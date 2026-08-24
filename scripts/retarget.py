@@ -10,9 +10,10 @@ Two-step pipeline per clip:
   per-DOF posture cost biases the solution toward step 1 so the refinement
   is a *tweak*, not a rearrangement.
 
-One clip becomes two layers of one motion in ``dataset/``: ``reference/``, the G1
-poses the IK aims at, and ``lite_pro/``, the joints it reached. ``scripts/store.py``
-defines that store, and ``scripts/publish.py`` uploads it.
+One clip becomes two layers of one motion in ``dataset/``: ``base/``, the source clip
+as published at 30 Hz, and ``lite_pro/``, at the 50 Hz control rate, holding the joints
+the IK reached and the goal it aimed at. ``scripts/store.py`` defines that store, and
+``scripts/publish.py`` uploads it.
 
 Usage:
     uv run scripts/retarget.py
@@ -39,8 +40,9 @@ from common import (  # noqa: E402
     G1_LAFAN_JOINT_NAMES,
     G1_TO_LITE,
     IK_BODY_PAIRS,
-    REFERENCE_BODIES,
     ROBOT_BODIES,
+    SOURCE_BODIES,
+    SOURCE_FPS,
     body_id,
     joint_qpos_addr,
     lite_joint_names,
@@ -48,9 +50,11 @@ from common import (  # noqa: E402
     load_g1_model,
     load_lafan_csv,
     load_lite_model,
+    quat_mul,
+    resample_motion,
     world_poses,
 )
-from store import write_blueprint, write_reference_layer, write_robot_layer  # noqa: E402
+from store import write_base_layer, write_blueprint, write_robot_layer  # noqa: E402
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 LAFAN_ROOT: Path = REPO_ROOT / ".cache" / "lafan1_g1"
@@ -284,39 +288,51 @@ def validate_ee_tracking(
     )
 
     mujoco.mj_kinematics(g1_model, g1_data)
-    pairs = IK_BODY_PAIRS.items()
-    rest_g1 = {g: g1_data.xmat[body_id(g1_model, g)].reshape(3, 3).copy() for _, g in pairs}
+    rest_g1 = {
+        name: g1_data.xmat[body_id(g1_model, name)].reshape(3, 3).copy()
+        for name in IK_BODY_PAIRS.values()
+    }
 
     matched_rest = np.zeros(lite_model.nq, dtype=np.float64)
     for _, (lite_name, _, offset) in G1_TO_LITE.items():
         matched_rest[joint_qpos_addr(lite_model, lite_name)] = offset
     lite_data.qpos[:] = matched_rest
     mujoco.mj_kinematics(lite_model, lite_data)
-    rest_lite = {l: lite_data.xmat[body_id(lite_model, l)].reshape(3, 3).copy() for l, _ in pairs}
+    rest_lite = {
+        name: lite_data.xmat[body_id(lite_model, name)].reshape(3, 3).copy()
+        for name in IK_BODY_PAIRS
+    }
 
     frames = lite_joint_pos.shape[0]
     indices = list(range(0, frames, SAMPLE_STRIDE))
-    stats: dict[str, dict[str, list[float]]] = {l: {"pos": [], "rot": []} for l, _ in pairs}
+    stats: dict[str, dict[str, list[float]]] = {
+        name: {"pos": [], "rot": []} for name in IK_BODY_PAIRS
+    }
 
     for t in indices:
         lite_data.qpos[lite_joint_addrs] = lite_joint_pos[t]
         mujoco.mj_kinematics(lite_model, lite_data)
         g1_data.qpos[g1_addrs] = motion["g1_joint_pos"][t]
         mujoco.mj_kinematics(g1_model, g1_data)
-        for lname, gname in pairs:
-            lbid, gbid = body_id(lite_model, lname), body_id(g1_model, gname)
-            stats[lname]["pos"].append(float(np.linalg.norm(lite_data.xpos[lbid] - g1_data.xpos[gbid])))
-            R_l = lite_data.xmat[lbid].reshape(3, 3) @ rest_lite[lname].T
-            R_g = g1_data.xmat[gbid].reshape(3, 3) @ rest_g1[gname].T
-            stats[lname]["rot"].append(_rotation_angle_error(R_l, R_g))
+        for lite_name, g1_name in IK_BODY_PAIRS.items():
+            lite_body = body_id(lite_model, lite_name)
+            g1_body = body_id(g1_model, g1_name)
+            stats[lite_name]["pos"].append(
+                float(np.linalg.norm(lite_data.xpos[lite_body] - g1_data.xpos[g1_body]))
+            )
+            R_lite = lite_data.xmat[lite_body].reshape(3, 3) @ rest_lite[lite_name].T
+            R_g1 = g1_data.xmat[g1_body].reshape(3, 3) @ rest_g1[g1_name].T
+            stats[lite_name]["rot"].append(_rotation_angle_error(R_lite, R_g1))
 
-    print(f"\nEE tracking error across {len(indices)} frames (stride={SAMPLE_STRIDE}, total={frames}):")
-    print(f"  {'body':<14s} {'pos mean':>9s} {'pos max':>9s}   {'rot mean':>9s} {'rot max':>9s}")
-    for lname, _ in pairs:
-        pos = np.asarray(stats[lname]["pos"])
-        rot = np.asarray(stats[lname]["rot"])
+    print(f"\nEE tracking error across {len(indices)} frames "
+          f"(stride={SAMPLE_STRIDE}, total={frames}):")
+    print(f"  {'body':<14s} {'pos mean':>9s} {'pos max':>9s}   "
+          f"{'rot mean':>9s} {'rot max':>9s}")
+    for lite_name in IK_BODY_PAIRS:
+        pos = np.asarray(stats[lite_name]["pos"])
+        rot = np.asarray(stats[lite_name]["rot"])
         print(
-            f"  {lname:<14s} {pos.mean():>8.3f}m {pos.max():>8.3f}m   "
+            f"  {lite_name:<14s} {pos.mean():>8.3f}m {pos.max():>8.3f}m   "
             f"{np.degrees(rot.mean()):>7.2f}° {np.degrees(rot.max()):>7.2f}°"
         )
 
@@ -333,6 +349,7 @@ class Models(NamedTuple):
     joint_addrs: np.ndarray
     joint_names: tuple[str, ...]
     z_offset: float
+    goal_conv: np.ndarray
 
 
 def load_models() -> Models:
@@ -351,20 +368,48 @@ def load_models() -> Models:
         ),
         joint_names=names,
         z_offset=_pelvis_z_offset(g1, lite),
+        goal_conv=_goal_conversions(g1, lite),
     )
+
+
+def _goal_conversions(
+    g1_model: mujoco.MjModel, lite_model: mujoco.MjModel
+) -> np.ndarray:
+    """Per-body wxyz rotation from the G1 frame convention into Lite's, root body first.
+
+    A G1 link and the Lite link it drives disagree about which way their axes point at
+    rest, by up to 120 degrees. A goal written in the raw G1 convention is therefore not
+    comparable to the link it is the goal for, and a tracking reward on orientation
+    would never reach zero. This is the same conversion the IK aims through, so the goal
+    a motion stores is the goal the IK was given.
+
+    The root body is not an IK target, and its goal is the base trajectory, so it
+    converts by the identity.
+    """
+    conversions = _rest_frame_conversions(g1_model, lite_model)
+    quats = np.zeros((len(ROBOT_BODIES), 4))
+    quats[0] = (1.0, 0.0, 0.0, 0.0)
+    for index, lite_name in enumerate(IK_BODY_PAIRS, start=1):
+        mujoco.mju_mat2Quat(quats[index], conversions[lite_name].reshape(9))
+    return quats
 
 
 # ── One clip, and the process that retargets it ───────────────────────────────
 
 
 class Clip(NamedTuple):
-    """One retargeted clip: the arrays the two layers of its motion are written from."""
+    """One retargeted clip: the arrays the two layers of its motion are written from.
 
+    The ``source_*`` arrays are the clip as published, at :data:`SOURCE_FPS`. The rest
+    are the retarget, at :data:`FPS`.
+    """
+
+    source_joint_pos: np.ndarray
+    source_pos: np.ndarray
+    source_quat: np.ndarray
     joint_pos: np.ndarray
-    lite_pos: np.ndarray
-    lite_quat: np.ndarray
-    g1_pos: np.ndarray
-    g1_quat: np.ndarray
+    goal_pos: np.ndarray
+    goal_quat: np.ndarray
 
 
 def retarget_clip(
@@ -376,12 +421,18 @@ def retarget_clip(
 ) -> Clip:
     """Run both steps on one clip, and pose the bodies each layer carries.
 
-    Both body sets ride the base trajectory of the retarget, so the gap between them is
-    the error of the retarget. The G1 bodies keep their raw orientation: the constant
-    rest-frame conversion of :func:`_rest_frame_conversions` belongs to the solve and not
-    to the source, so a reference triad sits at a fixed angle to the link it drives.
+    The base layer keeps the source untouched, at its own rate and in the frame
+    convention of the G1. The robot layer carries the goal, which is the same G1 pose
+    turned into the convention of the Lite link it drives, so it compares directly
+    against that link.
     """
-    motion = load_lafan_csv(Path(csv_path))
+    source = load_lafan_csv(Path(csv_path))
+    source_pos, source_quat = world_poses(
+        models.g1, models.g1_addrs, source["g1_joint_pos"],
+        source["base_pos"], source["base_quat_wxyz"], tuple(IK_BODY_PAIRS.values()),
+    )
+
+    motion = resample_motion(source, SOURCE_FPS, FPS)
     step1 = step1_direct_remap(motion, models.joint_addrs, models.lite, models.z_offset)
     joint_pos = step1["joint_pos"]
     if do_ik:
@@ -390,16 +441,16 @@ def retarget_clip(
             iters=ik_iters, show_progress=show_progress,
         )
 
-    base_pos, base_quat = step1["base_pos"], step1["base_quat"]
-    lite_pos, lite_quat = world_poses(
-        models.lite, models.joint_addrs, joint_pos, base_pos, base_quat,
-        tuple(IK_BODY_PAIRS),
+    # The goal rides the base trajectory of the retarget, not that of the source, so it
+    # sits where the Lite pelvis sits and the two are directly comparable.
+    goal_pos, goal_quat = world_poses(
+        models.g1, models.g1_addrs, motion["g1_joint_pos"],
+        step1["base_pos"], step1["base_quat"], tuple(IK_BODY_PAIRS.values()),
     )
-    g1_pos, g1_quat = world_poses(
-        models.g1, models.g1_addrs, motion["g1_joint_pos"], base_pos, base_quat,
-        tuple(IK_BODY_PAIRS.values()),
+    return Clip(
+        source["g1_joint_pos"], source_pos, source_quat,
+        joint_pos, goal_pos, quat_mul(goal_quat, models.goal_conv).astype(np.float32),
     )
-    return Clip(joint_pos, lite_pos, lite_quat, g1_pos, g1_quat)
 
 
 _MODELS: Models | None = None
@@ -459,9 +510,10 @@ def main(
         f"  {len(G1_TO_LITE)} joint pairs, {flipped} sign flips, "
         f"{nonzero} nonzero offsets, pelvis z-offset={models.z_offset * 1000:.2f} mm"
     )
+    print(f"  resampling {SOURCE_FPS} Hz -> {FPS} Hz")
 
     if validate_only:
-        motion = load_lafan_csv(csvs[0])
+        motion = resample_motion(load_lafan_csv(csvs[0]), SOURCE_FPS, FPS)
         step1 = step1_direct_remap(
             motion, models.joint_addrs, models.lite, models.z_offset
         )
@@ -488,15 +540,17 @@ def main(
 
     def write_all(clips, desc: str) -> None:
         for csv_path, result in tqdm(
-            zip(csvs, clips), total=len(csvs), desc=desc, unit="clip"
+            zip(csvs, clips, strict=True), total=len(csvs), desc=desc, unit="clip"
         ):
             name = f"{MOTION_PREFIX}_{csv_path.stem}"
-            written.append(write_reference_layer(
-                DATASET_ROOT, name, FPS, REFERENCE_BODIES, result.g1_pos, result.g1_quat
+            written.append(write_base_layer(
+                DATASET_ROOT, name, SOURCE_FPS, G1_LAFAN_JOINT_NAMES,
+                result.source_joint_pos, SOURCE_BODIES,
+                result.source_pos, result.source_quat,
             ))
             written.append(write_robot_layer(
                 DATASET_ROOT, name, urdf, FPS, models.joint_names, result.joint_pos,
-                ROBOT_BODIES, REFERENCE_BODIES, result.lite_pos, result.lite_quat,
+                ROBOT_BODIES, SOURCE_BODIES, result.goal_pos, result.goal_quat,
             ))
 
     if workers > 1:

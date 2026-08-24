@@ -28,7 +28,7 @@ from huggingface_hub import DatasetCard, HfApi
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import DATASET_REPO_ID  # noqa: E402
-from store import REFERENCE_LAYER  # noqa: E402
+from store import BASE_LAYER  # noqa: E402
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 DATASET_ROOT: Path = REPO_ROOT / "dataset"
@@ -82,7 +82,7 @@ def main(
     # a broken card fails here and not on the Hub.
     motions = [
         path for path in files
-        if path.suffix == ".rrd" and path.parent.name != REFERENCE_LAYER
+        if path.suffix == ".rrd" and path.parent.name != BASE_LAYER
     ]
     card = CARD_PATH.read_text().replace(
         MOTIONS_MARKER, _motion_index(motions, repo_id)

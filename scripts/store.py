@@ -56,7 +56,6 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-
 from common import quat_mul
 
 #: Shared by every motion, so a directory of them registers as one dataset.
@@ -102,8 +101,7 @@ def write_base_layer(
         stream.send_property("motion", rr.AnyValues(
             fps=fps, joint_names=list(joint_names), body_names=list(body_names)
         ))
-        indexes = _indexes(joint_pos.shape[0], fps)
-        _send_joints(stream, BASE_LAYER, indexes, fps, joint_names, joint_pos)
+        _send_joints(stream, BASE_LAYER, fps, joint_names, joint_pos)
         _send_bodies(stream, f"{BASE_LAYER}/body", fps, body_names, body_pos, body_quat)
     return path
 
@@ -159,9 +157,8 @@ def write_robot_layer(
             source_body_names=list(source_body_names),
         ))
         tree.log_urdf_to_recording(recording=stream)
+        _send_joints(stream, robot, fps, joint_names, joint_pos)
         _send_bodies(stream, f"{robot}/goal", fps, body_names, body_pos, body_quat)
-
-        _send_joints(stream, robot, indexes, fps, joint_names, joint_pos)
 
         # The frame graph that puts the geometry where the joints say it is. Each joint
         # is its own chunk, so a row still carries one parent-child relation.
@@ -177,17 +174,21 @@ def write_robot_layer(
 
         root_link = tree.root_link().name
         placement = body_names.index(root_link)
-        stream.send_columns(f"/{robot}/tf", indexes=indexes, columns=rr.Transform3D.columns(
-            translation=body_pos[:, placement],
-            quaternion=_wxyz_to_xyzw(body_quat[:, placement]),
-            child_frame=[f"{robot}/{root_link}"] * frames,
-            parent_frame=[WORLD_FRAME] * frames,
-        ))
+        stream.send_columns(
+            f"/{robot}/tf",
+            indexes=indexes,
+            columns=rr.Transform3D.columns(
+                translation=body_pos[:, placement],
+                quaternion=_wxyz_to_xyzw(body_quat[:, placement]),
+                child_frame=[f"{robot}/{root_link}"] * frames,
+                parent_frame=[WORLD_FRAME] * frames,
+            ),
+        )
     return path
 
 
 def write_blueprint(root: Path, urdf_path: Path) -> Path:
-    """Write ``blueprints/<robot>.rbl``, the layout to pass to ``rerun`` after the layers."""
+    """Write ``blueprints/<robot>.rbl``, the layout ``rerun`` takes after the layers."""
     robot = _robot_name(urdf_path)
     path = root / "blueprints" / f"{robot}.rbl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,13 +204,13 @@ def _robot_name(urdf_path: Path) -> str:
 def _send_joints(
     stream: rr.RecordingStream,
     layer: str,
-    indexes: list[rr.TimeColumn],
     fps: int,
     joint_names: tuple[str, ...],
     joint_pos: np.ndarray,
 ) -> None:
     """Write one layer's joint positions, and the velocities differenced from them."""
     frames = joint_pos.shape[0]
+    indexes = _indexes(frames, fps)
     joint_vel = np.zeros_like(joint_pos)
     joint_vel[1:] = np.diff(joint_pos, axis=0) * fps
     rows = [len(joint_names)] * frames
@@ -351,7 +352,9 @@ def _robot_blueprint(robot: str) -> rrb.Blueprint:
     own triads in its own frame convention, so it is off by a fixed angle by
     construction, and its velocities start switched off with everything else.
     """
-    hidden = _hidden_velocities(f"{BASE_LAYER}/body") | _hidden_velocities(f"{robot}/goal")
+    hidden = (
+        _hidden_velocities(f"{BASE_LAYER}/body") | _hidden_velocities(f"{robot}/goal")
+    )
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(origin="/", name=robot, overrides=hidden),

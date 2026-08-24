@@ -267,7 +267,9 @@ def resample_motion(
     t_dst = np.clip(
         np.arange(round(t_src[-1] * dst_fps) + 1) / dst_fps, 0.0, t_src[-1]
     )
-    rotations = Slerp(t_src, Rotation.from_quat(motion["base_quat_wxyz"][:, [1, 2, 3, 0]]))
+    rotations = Slerp(
+        t_src, Rotation.from_quat(motion["base_quat_wxyz"][:, [1, 2, 3, 0]])
+    )
     return {
         "base_pos": _interp(t_dst, t_src, motion["base_pos"]),
         "base_quat_wxyz": rotations(t_dst).as_quat().astype(np.float32)[:, [3, 0, 1, 2]],

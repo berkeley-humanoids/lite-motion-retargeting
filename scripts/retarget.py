@@ -288,39 +288,51 @@ def validate_ee_tracking(
     )
 
     mujoco.mj_kinematics(g1_model, g1_data)
-    pairs = IK_BODY_PAIRS.items()
-    rest_g1 = {g: g1_data.xmat[body_id(g1_model, g)].reshape(3, 3).copy() for _, g in pairs}
+    rest_g1 = {
+        name: g1_data.xmat[body_id(g1_model, name)].reshape(3, 3).copy()
+        for name in IK_BODY_PAIRS.values()
+    }
 
     matched_rest = np.zeros(lite_model.nq, dtype=np.float64)
     for _, (lite_name, _, offset) in G1_TO_LITE.items():
         matched_rest[joint_qpos_addr(lite_model, lite_name)] = offset
     lite_data.qpos[:] = matched_rest
     mujoco.mj_kinematics(lite_model, lite_data)
-    rest_lite = {l: lite_data.xmat[body_id(lite_model, l)].reshape(3, 3).copy() for l, _ in pairs}
+    rest_lite = {
+        name: lite_data.xmat[body_id(lite_model, name)].reshape(3, 3).copy()
+        for name in IK_BODY_PAIRS
+    }
 
     frames = lite_joint_pos.shape[0]
     indices = list(range(0, frames, SAMPLE_STRIDE))
-    stats: dict[str, dict[str, list[float]]] = {l: {"pos": [], "rot": []} for l, _ in pairs}
+    stats: dict[str, dict[str, list[float]]] = {
+        name: {"pos": [], "rot": []} for name in IK_BODY_PAIRS
+    }
 
     for t in indices:
         lite_data.qpos[lite_joint_addrs] = lite_joint_pos[t]
         mujoco.mj_kinematics(lite_model, lite_data)
         g1_data.qpos[g1_addrs] = motion["g1_joint_pos"][t]
         mujoco.mj_kinematics(g1_model, g1_data)
-        for lname, gname in pairs:
-            lbid, gbid = body_id(lite_model, lname), body_id(g1_model, gname)
-            stats[lname]["pos"].append(float(np.linalg.norm(lite_data.xpos[lbid] - g1_data.xpos[gbid])))
-            R_l = lite_data.xmat[lbid].reshape(3, 3) @ rest_lite[lname].T
-            R_g = g1_data.xmat[gbid].reshape(3, 3) @ rest_g1[gname].T
-            stats[lname]["rot"].append(_rotation_angle_error(R_l, R_g))
+        for lite_name, g1_name in IK_BODY_PAIRS.items():
+            lite_body = body_id(lite_model, lite_name)
+            g1_body = body_id(g1_model, g1_name)
+            stats[lite_name]["pos"].append(
+                float(np.linalg.norm(lite_data.xpos[lite_body] - g1_data.xpos[g1_body]))
+            )
+            R_lite = lite_data.xmat[lite_body].reshape(3, 3) @ rest_lite[lite_name].T
+            R_g1 = g1_data.xmat[g1_body].reshape(3, 3) @ rest_g1[g1_name].T
+            stats[lite_name]["rot"].append(_rotation_angle_error(R_lite, R_g1))
 
-    print(f"\nEE tracking error across {len(indices)} frames (stride={SAMPLE_STRIDE}, total={frames}):")
-    print(f"  {'body':<14s} {'pos mean':>9s} {'pos max':>9s}   {'rot mean':>9s} {'rot max':>9s}")
-    for lname, _ in pairs:
-        pos = np.asarray(stats[lname]["pos"])
-        rot = np.asarray(stats[lname]["rot"])
+    print(f"\nEE tracking error across {len(indices)} frames "
+          f"(stride={SAMPLE_STRIDE}, total={frames}):")
+    print(f"  {'body':<14s} {'pos mean':>9s} {'pos max':>9s}   "
+          f"{'rot mean':>9s} {'rot max':>9s}")
+    for lite_name in IK_BODY_PAIRS:
+        pos = np.asarray(stats[lite_name]["pos"])
+        rot = np.asarray(stats[lite_name]["rot"])
         print(
-            f"  {lname:<14s} {pos.mean():>8.3f}m {pos.max():>8.3f}m   "
+            f"  {lite_name:<14s} {pos.mean():>8.3f}m {pos.max():>8.3f}m   "
             f"{np.degrees(rot.mean()):>7.2f}° {np.degrees(rot.max()):>7.2f}°"
         )
 
@@ -528,7 +540,7 @@ def main(
 
     def write_all(clips, desc: str) -> None:
         for csv_path, result in tqdm(
-            zip(csvs, clips), total=len(csvs), desc=desc, unit="clip"
+            zip(csvs, clips, strict=True), total=len(csvs), desc=desc, unit="clip"
         ):
             name = f"{MOTION_PREFIX}_{csv_path.stem}"
             written.append(write_base_layer(

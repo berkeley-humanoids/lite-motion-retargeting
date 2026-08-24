@@ -10,9 +10,10 @@ A layer is a stage of the pipeline, a directory, and one file per motion:
 it. ``<robot>/`` is self-contained: its joints reset the robot, its body poses are the
 goal the robot tracks, and its geometry draws it.
 
-A robot layer stores the **goal**, not the pose the solve reached. The reached pose is
-the forward kinematics of the joints in the same file, so storing it would repeat what
-is already there, and the goal is recoverable from nothing else. The joint chain under
+A robot layer stores the **goal**, not the pose the solve reached, and says so in the
+path: ``/<robot>/goal/`` and not ``/<robot>/body/``. The reached pose is the forward
+kinematics of the joints in the same file, so storing it would repeat what is already
+there, and the goal is recoverable from nothing else. The joint chain under
 ``/<robot>/tf`` already draws the robot where the solve put it, so the gap between the
 robot and its goal triads is the error of the solve, in one file.
 
@@ -23,10 +24,11 @@ Blueprints do not merge and the last one loaded wins, so pass the ``.rbl`` last.
 
 Both layers store bodies and joints the same way, so one writer serves both:
 
-    /<layer>/body/poses/<body>        Transform3D, an entity per body, a row per frame
-    /<layer>/body/frames/<body>       an axis triad bound to that body's frame, static
-    /<layer>/body/linear_velocities   Arrows3D, a row per frame, an arrow per body
-    /<layer>/body/angular_velocities  Arrows3D
+    /base/body/poses/<body>           Transform3D, an entity per body, a row per frame
+    /base/body/frames/<body>          an axis triad bound to that body's frame, static
+    /base/body/linear_velocities      Arrows3D, a row per frame, an arrow per body
+    /base/body/angular_velocities     Arrows3D
+    /<robot>/goal/...                 the same four, for where the bodies are meant to be
     /<layer>/joint/positions          Scalars, a row per frame, a scalar per joint
     /<layer>/joint/velocities         Scalars
     /<robot>/tf                       a Transform3D per joint, and the root placement
@@ -36,7 +38,7 @@ Both layers store bodies and joints the same way, so one writer serves both:
 A pose names a transform frame instead of riding the entity hierarchy, which is what
 Rerun recommends for robot data and what ``rr.urdf`` writes. The layer prefixes the frame
 name, so a source body and a robot link of the same name stay apart, and so do
-``<robot>/body/<link>`` and the ``<robot>/<link>`` that the joint chain already defines.
+``<robot>/goal/<link>`` and the ``<robot>/<link>`` that the joint chain already defines.
 A frame has one parent.
 
 Every entity drawn in 3D must name a frame. One that names none is an orphan: the viewer
@@ -102,7 +104,7 @@ def write_base_layer(
         ))
         indexes = _indexes(joint_pos.shape[0], fps)
         _send_joints(stream, BASE_LAYER, indexes, fps, joint_names, joint_pos)
-        _send_bodies(stream, BASE_LAYER, fps, body_names, body_pos, body_quat)
+        _send_bodies(stream, f"{BASE_LAYER}/body", fps, body_names, body_pos, body_quat)
     return path
 
 
@@ -126,7 +128,8 @@ def write_robot_layer(
     included, so a second robot can open beside it.
 
     ``body_pos`` and ``body_quat`` are the **goal**, in this robot's frame convention,
-    which is what a tracking reward compares against. ``source_body_names`` names the
+    which is what a tracking reward compares against, and they go under ``/<robot>/goal/``
+    so no reader mistakes them for where the robot is. ``source_body_names`` names the
     body of the source rig each goal came from, in the order of ``body_names``, because
     two rigs need not share a vocabulary.
 
@@ -156,7 +159,7 @@ def write_robot_layer(
             source_body_names=list(source_body_names),
         ))
         tree.log_urdf_to_recording(recording=stream)
-        _send_bodies(stream, robot, fps, body_names, body_pos, body_quat)
+        _send_bodies(stream, f"{robot}/goal", fps, body_names, body_pos, body_quat)
 
         _send_joints(stream, robot, indexes, fps, joint_names, joint_pos)
 
@@ -268,19 +271,23 @@ def _velocities(
 
 def _send_bodies(
     stream: rr.RecordingStream,
-    layer: str,
+    group: str,
     fps: int,
     body_names: tuple[str, ...],
     body_pos: np.ndarray,
     body_quat: np.ndarray,
 ) -> None:
-    """Write one layer's body poses, triads, and velocities under ``/<layer>/body/``."""
+    """Write a group of body poses, triads, and velocities under ``/<group>/``.
+
+    ``group`` is ``<layer>/body`` where the poses are where the bodies are, and
+    ``<layer>/goal`` where they are where the bodies are meant to be.
+    """
     frames = body_pos.shape[0]
     indexes = _indexes(frames, fps)
     for i, body in enumerate(body_names):
-        frame = f"{layer}/body/{body}"
+        frame = f"{group}/{body}"
         stream.send_columns(
-            f"/{layer}/body/poses/{body}",
+            f"/{group}/poses/{body}",
             indexes=indexes,
             columns=rr.Transform3D.columns(
                 translation=body_pos[:, i],
@@ -290,7 +297,7 @@ def _send_bodies(
             ),
         )
         stream.log(
-            f"/{layer}/body/frames/{body}",
+            f"/{group}/frames/{body}",
             _axis_triad(),
             rr.CoordinateFrame(frame=frame),
             static=True,
@@ -302,12 +309,12 @@ def _send_bodies(
         # The velocities are siblings of the poses, not children: an Arrows3D below a
         # posed entity would inherit that pose and turn its vectors.
         stream.log(
-            f"/{layer}/body/{entity}_velocities",
+            f"/{group}/{entity}_velocities",
             rr.CoordinateFrame(frame=WORLD_FRAME),
             static=True,
         )
         stream.send_columns(
-            f"/{layer}/body/{entity}_velocities",
+            f"/{group}/{entity}_velocities",
             indexes=indexes,
             columns=rr.Arrows3D.columns(
                 origins=body_pos.reshape(-1, 3), vectors=vectors.reshape(-1, 3)
@@ -315,14 +322,14 @@ def _send_bodies(
         )
 
 
-def _hidden_velocities(layer: str) -> dict[str, rrb.EntityBehavior]:
-    """Start one layer's velocity arrows switched off.
+def _hidden_velocities(group: str) -> dict[str, rrb.EntityBehavior]:
+    """Start one group's velocity arrows switched off.
 
     At walking speed the arrows are metres long and bury the robot. Hiding keeps them in
     the entity tree, one click away; excluding them would take a view filter edit.
     """
     return {
-        f"/{layer}/body/{quantity}_velocities": rrb.EntityBehavior(visible=False)
+        f"/{group}/{quantity}_velocities": rrb.EntityBehavior(visible=False)
         for quantity in ("linear", "angular")
     }
 
@@ -330,7 +337,7 @@ def _hidden_velocities(layer: str) -> dict[str, rrb.EntityBehavior]:
 def _base_blueprint() -> rrb.Blueprint:
     return rrb.Blueprint(
         rrb.Spatial3DView(
-            origin="/", name="source", overrides=_hidden_velocities(BASE_LAYER)
+            origin="/", name="source", overrides=_hidden_velocities(f"{BASE_LAYER}/body")
         ),
         rrb.TimePanel(state="expanded"),
     )
@@ -344,7 +351,7 @@ def _robot_blueprint(robot: str) -> rrb.Blueprint:
     own triads in its own frame convention, so it is off by a fixed angle by
     construction, and its velocities start switched off with everything else.
     """
-    hidden = _hidden_velocities(BASE_LAYER) | _hidden_velocities(robot)
+    hidden = _hidden_velocities(f"{BASE_LAYER}/body") | _hidden_velocities(f"{robot}/goal")
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(origin="/", name=robot, overrides=hidden),

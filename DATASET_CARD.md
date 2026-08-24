@@ -46,15 +46,15 @@ opens any set of them as one recording.
 | `lite_pro/<motion>.rrd` | Everything the robot needs, at 50 Hz: the retargeted joints, the goal its bodies track, and the URDF geometry that draws it. |
 | `blueprints/lite_pro.rbl` | The viewer layout. |
 
-The robot layer is self-contained. Its joints reset the robot, and its body poses are the
-**goal**, in the frame convention of the Lite links, so a tracking reward compares them
-against the robot directly. `source_body_names` records which G1 link each goal came
-from. The layer stores no reached pose, because that is the forward kinematics of the
-joints beside it, and the `/lite_pro/tf` chain already draws the robot there. The gap
-between the robot and its goal triads is the error of the retarget, frame by frame.
+The robot layer is self-contained. Its joints reset the robot, and `/lite_pro/goal/`
+holds what the robot tracks, in the frame convention of the Lite links, so a reward
+compares it against the robot directly. `source_body_names` records which G1 link each
+goal came from. The layer stores no reached pose, because that is the forward kinematics
+of the joints beside it, and the `/lite_pro/tf` chain already draws the robot there. The
+gap between the robot and its goal triads is the error of the retarget, frame by frame.
 
-Both layers carry the pelvis, both feet, and both hands, the robot layer under the Lite
-link names and the base layer under the G1 ones.
+Both layers carry the pelvis, both feet, and both hands: `/lite_pro/goal/` under the Lite
+link names, and `/base/body/` under the G1 ones.
 
 Every array is world frame, in metres and radians, and a rotation is `xyzw`. A velocity
 is the backward difference against the frame before it, so frame 0 holds zero. Every

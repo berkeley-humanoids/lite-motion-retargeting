@@ -1,28 +1,28 @@
-"""Build the motion browser: write what ``site/index.html`` plays into ``site/data/``.
+"""Write the motions and the robot that ``site/index.html`` plays into ``site/data/``.
 
 The page is static, so any file server that answers range requests can host it, the
-Hugging Face Hub included. It reads the robot layer of each motion in ``dataset/``, which
-is what training reads, so the page shows the motion the robot tracks:
+Hugging Face Hub included. The page shows the robot layer of each motion in ``dataset/``.
+Training reads the same layer, so the page shows the motion that the robot tracks:
 
     site/data/index.json.gz             the motions: name, source, category, length, ...
     site/data/robot.json                the link tree of the URDF, and a mesh per visual
     site/data/robot.bin                 those meshes: float32 xyz vertices, then uint32 triangles
     site/data/packs/<source>-<n>.bin    the motions of a source, end to end
 
-A pack holds, for each motion, float32 rows at the rate of the robot layer, then the same
-rows over its busiest few seconds, the preview a card plays. An index entry gives each
-as ``[pack, offset, bytes]``, and the page reads it as a byte range. A file per motion
-would leave the Hub with far more files than it takes in a repo.
+For each motion, a pack holds float32 rows at the rate of the robot layer. Then it holds
+the rows of the busiest few seconds again, as the preview that a card plays. An index
+entry gives the location of each as ``[pack, offset, bytes]``, and the page reads it as a
+byte range. A file per motion would put more files in a Hub repo than the Hub accepts.
 
-A row is the pelvis position (xyz), the pelvis rotation (xyzw, as three.js takes it),
-then the angle of each joint the motion moves. An index entry names those joints by one
-of ``joint_sets``, since most motions move the same ones. A joint it does not list, such
-as a finger, stays at zero. A motion no longer than a preview has no preview, and its
-card plays the whole motion.
+A row is the pelvis position (xyz), the pelvis rotation (xyzw, the three.js order), then
+the angle of each joint that the motion moves. Most motions move the same joints, so an
+index entry names its joints by a position in ``joint_sets``. A joint that the entry does
+not name, such as a finger, stays at zero. A motion no longer than a preview has no
+preview, and its card plays the whole motion.
 
-An entry also names the joints its source drives, by one of ``active_sets``. The index
-lists the joint ``groups`` and the Lite ``robots`` by their joints, so the page can say
-what of each robot a motion can train.
+An entry also names the joints that its source drives, by a position in ``active_sets``.
+The index lists the joints of each joint group in ``groups`` and of each Lite variant in
+``robots``. Thus the page can show which joints of each robot a motion can train.
 
 Usage:
     uv run scripts/build_site.py
@@ -59,13 +59,13 @@ REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 DATASET_ROOT: Path = REPO_ROOT / "dataset"
 SITE_DATA: Path = REPO_ROOT / "site" / "data"
 
-#: Seconds. A card loops this much of its motion, from where the joints move most.
+#: Seconds. A card loops this much of its motion, where the joints move most.
 PREVIEW_SECONDS: float = 4.0
 
-#: Bytes. A pack ends once the next motion would take it past this.
+#: Bytes. A pack ends when the next motion would take it past this size.
 PACK_BYTES: int = 256 * 2**20
 
-#: The joint groups the page names, each by a pattern of the joint names.
+#: The joint groups that the page names, each as a pattern that matches its joint names.
 GROUPS: dict[str, str] = {
     "Legs": r".*_(hip_.*|knee_pitch|ankle_pitch|ankle_roll)",
     "Ankle yaw": r".*_ankle_yaw",
@@ -76,7 +76,7 @@ GROUPS: dict[str, str] = {
     "Fingers": r".*_finger.*",
 }
 
-#: The Lite variants a motion may train, by their package name, and what the page calls them.
+#: The Lite variants that a motion can train, by package name, with their names on the page.
 ROBOTS: dict[str, str] = {
     "lite_biped": "Lite Biped",
     "lite_bimanual": "Lite Bimanual",
@@ -85,8 +85,10 @@ ROBOTS: dict[str, str] = {
     "lite_pro": "Lite Pro",
 }
 
-#: The Rerun web viewer, and where it finds a published motion.
+#: The Rerun web viewer. It opens the recording at the URL that follows this prefix.
 VIEWER: str = "https://rerun.io/viewer?url="
+
+#: The URL prefix of the files in the Hub repo.
 HUB_FILES: str = f"https://huggingface.co/datasets/{DATASET_REPO_ID}/resolve/main/"
 
 
@@ -94,11 +96,11 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     """Write ``site/data/`` from the robot layer of ``dataset/``.
 
     Args:
-        sources: Keys of ``sources.SOURCES`` to include. Every source by default. A site
-            others can reach should hold ``lafan1`` and the ``kimodo`` sources only: the
-            licenses of the others bar sharing their motions.
-        out: The directory to write. ``scripts/publish.py`` writes the one it uploads
-            elsewhere, so the local site keeps every source.
+        sources: The keys of ``sources.SOURCES`` to include. The default is every source.
+            For a site that others can open, include only ``lafan1`` and the ``kimodo``
+            sources. The licenses of the other sources do not let you share their motions.
+        out: The directory to write. ``scripts/publish.py`` writes its upload to a different
+            directory, so the local site keeps every source.
     """
     urdf = lite_urdf_path()
     robot = ET.parse(urdf).getroot().get("name")
@@ -106,18 +108,17 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     sources = sources or list(SOURCES)
     unknown = sorted(set(sources) - set(SOURCES))
     if unknown:
-        raise SystemExit(f"Unknown sources {unknown}. Expected some of {sorted(SOURCES)}.")
-    paths = sorted(
-        path for path in layer.glob("*.rrd") if path.stem.split("_", 1)[0] in sources
-    )
+        raise SystemExit(f"Unknown sources {unknown}. Choose from {sorted(SOURCES)}.")
+    paths = sorted(path for path in layer.glob("*.rrd") if source_of(path) in sources)
     if not paths:
         raise SystemExit(f"No motions of {sources} under {layer}. Run scripts/retarget.py.")
     # The page lists a source only if it has a motion to show.
-    present = {path.stem.split("_", 1)[0] for path in paths}
+    present = {source_of(path) for path in paths}
     sources = [source for source in sources if source in present]
 
-    # The data is derived, so a stale file is only ever left over: start empty. site/data can
-    # be a link to another disk, and rmtree does not follow a link, so clear what it points to.
+    # All of the data is derived, so a file that is already there is stale: start empty.
+    # site/data can be a link to another disk, and rmtree does not follow a link, so clear
+    # the target of the link.
     target = out.resolve()
     shutil.rmtree(target, ignore_errors=True)
     (target / "packs").mkdir(parents=True)
@@ -125,36 +126,31 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
 
     clips = {source: clip_paths(source) for source in sources}
     joint_names: list[str] = []
-    joint_sets: list[list[int]] = []
-    active_sets: list[list[int]] = []
+    # Each set maps to its position, in the order that the motions first use it.
+    joint_sets: dict[tuple[int, ...], int] = {}
+    active_sets: dict[tuple[int, ...], int] = {}
     motions = []
     packs = Packs(out)
-    export = partial(export_motion, robot=robot)
     with ProcessPoolExecutor(max_workers=min(os.cpu_count(), len(paths))) as pool:
-        exported = pool.map(export, paths, chunksize=16)
+        exported = pool.map(partial(export_motion, robot=robot), paths, chunksize=16)
         for path, entry in tqdm(zip(paths, exported, strict=True), total=len(paths), unit="motion"):
             names = entry.pop("joint_names")
             if not joint_names:
                 joint_names = names
             if names != joint_names:
-                raise SystemExit(f"{path}: its joints differ from those of the other motions.")
-            joints = entry.pop("joints")
-            if joints not in joint_sets:
-                joint_sets.append(joints)
-            active = entry.pop("active")
-            if active not in active_sets:
-                active_sets.append(active)
-            source = path.stem.split("_", 1)[0]
-            clip = clips[source].get(path.stem)
+                raise SystemExit(f"{path}: its joints differ from the joints of the other motions.")
+            joints, active = entry.pop("joints"), entry.pop("active")
             rows, preview = entry.pop("rows"), entry.pop("preview")
+            source = source_of(path)
+            clip = clips[source].get(path.stem)
             motions.append({
                 "name": path.stem,
                 "source": source,
                 "clip": clip,
                 "category": category(clip) if clip else "Other",
                 **entry,
-                "joint_set": joint_sets.index(joints),
-                "active_set": active_sets.index(active),
+                "joint_set": joint_sets.setdefault(joints, len(joint_sets)),
+                "active_set": active_sets.setdefault(active, len(active_sets)),
                 "motion": packs.add(source, rows),
                 "preview": packs.add(source, preview) if preview else None,
             })
@@ -163,8 +159,8 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
         "robot": robot,
         "viewer": VIEWER,
         "joint_names": joint_names,
-        "joint_sets": joint_sets,
-        "active_sets": active_sets,
+        "joint_sets": list(joint_sets),
+        "active_sets": list(active_sets),
         "groups": [
             {"title": title, "joints": [i for i, name in enumerate(joint_names) if re.fullmatch(pattern, name)]}
             for title, pattern in GROUPS.items()
@@ -180,17 +176,17 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
                 "license": SOURCES[key].license,
                 "skeleton": SOURCES[key].skeleton,
                 "url": SOURCES[key].page or f"https://huggingface.co/datasets/{SOURCES[key].repo_id}",
-                # The Hub repo holds this source alone, so only its motions have a URL the
-                # web viewer can open.
+                # The Hub repo holds only the public source, so only its motions have a URL
+                # that the web viewer can open.
                 "hub": f"{HUB_FILES}{robot}/" if key == PUBLIC_SOURCE else None,
             }
             for key in sources
         },
         "motions": motions,
     }
-    # The index of every source runs to tens of MB, which gzip takes to a few. The Hub
-    # serves a large file as stored, so the page unpacks it itself. mtime=0 keeps the
-    # bytes, and so the upload, the same when the motions are.
+    # The index of every source is tens of MB, and gzip makes it a few MB. The Hub serves
+    # a large file as stored, so the page decompresses it. With mtime=0, the same motions
+    # give the same bytes, and thus the same upload.
     text = json.dumps(index, separators=(",", ":")).encode()
     (out / "index.json.gz").write_bytes(gzip.compress(text, compresslevel=9, mtime=0))
 
@@ -200,22 +196,27 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     print("  serve: uv run scripts/serve.py")
 
 
+def source_of(path: Path) -> str:
+    """Return the source key of a motion file, which is named ``<source>_<clip>``."""
+    return path.stem.split("_", 1)[0]
+
+
 class Packs:
     """Writes motions end to end into ``packs/`` under a directory, a run of packs per source."""
 
     def __init__(self, out: Path) -> None:
         self.out = out
         self.names: list[str] = []
-        self.source = None
+        self.source: str | None = None
         self.size = 0
 
     def add(self, source: str, data: bytes) -> list[int]:
-        """Write ``data`` and return where it went, as ``[pack, offset, bytes]``.
+        """Write ``data``, and return its location as ``[pack, offset, bytes]``.
 
-        A pack holds one source, so the motions of a source can be served apart from the
-        others.
+        A pack holds only one source, so a server can serve the motions of a source without
+        the others.
         """
-        if not self.names or source != self.source or self.size + len(data) > PACK_BYTES:
+        if source != self.source or self.size + len(data) > PACK_BYTES:
             count = sum(name.startswith(f"packs/{source}-") for name in self.names)
             self.names.append(f"packs/{source}-{count:03d}.bin")
             self.source = source
@@ -230,17 +231,24 @@ class Packs:
 def export_motion(path: Path, robot: str) -> dict:
     """Read the motion in ``path``, and return its index fields and its bytes.
 
-    ``rows`` holds the bytes of the motion and ``preview`` those of its preview, or None
-    when the motion is no longer than one. It also returns the joint names of the layer,
-    and the indexes of the joints that move, which the caller checks and gathers across
-    motions.
+    The caller removes the fields that are not for the index. ``rows`` holds the bytes of
+    the motion, and ``preview`` holds the bytes of its preview, or None if the motion is no
+    longer than a preview. ``joint_names`` lists the joints of the layer. ``joints`` lists
+    the joints that move, and ``active`` lists the joints that the source drives, both as
+    positions in ``joint_names``.
     """
     fps, names, active, rows = read_robot_layer(path, robot)
-    # A joint that never leaves zero, such as a finger, adds bytes and no motion.
+    # A joint that stays at zero, such as a finger, adds bytes and no motion.
     moving = np.flatnonzero(np.abs(rows[:, 7:]).max(axis=0) > 0.0)
-    rows = np.ascontiguousarray(np.hstack([rows[:, :7], rows[:, 7 + moving]]))
-    start, stop = preview_window(rows[:, 7:], round(PREVIEW_SECONDS * fps))
-    preview = rows[start:stop].tobytes() if stop - start < len(rows) else None
+    rows = np.hstack([rows[:, :7], rows[:, 7 + moving]])
+    # The preview is the window in which the joints travel furthest.
+    window = round(PREVIEW_SECONDS * fps)
+    preview = None
+    if len(rows) > window:
+        speed = np.abs(np.diff(rows[:, 7:], axis=0)).sum(axis=1)
+        travelled = np.concatenate([[0.0], np.cumsum(speed)])
+        start = int(np.argmax(travelled[window - 1:] - travelled[:-(window - 1)]))
+        preview = rows[start:start + window].tobytes()
     travel = np.linalg.norm(np.diff(rows[:, :2], axis=0), axis=1).sum()
     return {
         "fps": fps,
@@ -251,19 +259,21 @@ def export_motion(path: Path, robot: str) -> dict:
         "rows": rows.tobytes(),
         "preview": preview,
         "joint_names": names,
-        "joints": moving.tolist(),
-        "active": [names.index(name) for name in active],
+        "joints": tuple(moving.tolist()),
+        "active": tuple(names.index(name) for name in active),
     }
 
 
 def read_robot_layer(path: Path, robot: str) -> tuple[int, list[str], list[str], np.ndarray]:
-    """Read the rate, the joint names, the joints the source drives, and the ``(T, 7 + J)``
-    rows of a robot layer.
+    """Read the rate, joint names, driven joints and ``(T, 7 + J)`` rows of a robot layer.
 
-    The pelvis pose comes from its goal, which is the base the retarget placed the robot
-    at, so it is exactly where the joint chain in the file puts the root. A layer written
-    before it kept the driven joints came from a G1 source, and drives the G1 joints.
+    The pelvis pose comes from the pelvis goal, which is the base where the retarget placed
+    the robot. Thus the pose is exactly where the joint chain in the file puts the root. A
+    layer without ``active_joint_names`` is older than that property. Such a layer comes
+    from a G1 source, so it drives the G1 joints.
     """
+    positions = f"/{robot}/joint/positions"
+    pelvis = f"/{robot}/goal/poses/pelvis"
     columns: dict[str, list[pa.RecordBatch]] = {}
     joint_names, active, fps = None, None, None
     for chunk in RrdReader(path).stream():
@@ -272,10 +282,10 @@ def read_robot_layer(path: Path, robot: str) -> tuple[int, list[str], list[str],
             properties = chunk.to_record_batch().to_pydict()
             joint_names, fps = properties["joint_names"][0], properties["fps"][0][0]
             active = properties.get("active_joint_names", [G1_DRIVEN])[0]
-        elif entity in (f"/{robot}/joint/positions", f"/{robot}/goal/poses/pelvis"):
+        elif entity in (positions, pelvis):
             columns.setdefault(entity, []).append(chunk.to_record_batch())
     if joint_names is None:
-        raise SystemExit(f"{path}: no /__properties/{robot}. Is it a robot layer?")
+        raise SystemExit(f"{path}: no /__properties/{robot}, so the file is not a robot layer.")
 
     def values(entity: str, component: str, width: int) -> np.ndarray:
         table = pa.Table.from_batches(columns[entity]).sort_by("frame")
@@ -284,18 +294,16 @@ def read_robot_layer(path: Path, robot: str) -> tuple[int, list[str], list[str],
             flat = flat.flatten()
         return flat.to_numpy().astype(np.float32).reshape(-1, width)
 
-    joint_pos = values(f"/{robot}/joint/positions", "Scalars:scalars", len(joint_names))
-    pelvis = f"/{robot}/goal/poses/pelvis"
     rows = np.hstack([
         values(pelvis, "Transform3D:translation", 3),
         values(pelvis, "Transform3D:quaternion", 4),
-        joint_pos,
+        values(positions, "Scalars:scalars", len(joint_names)),
     ])
     return int(fps), list(joint_names), list(active), rows
 
 
 def robot_joints(variant: str) -> list[str]:
-    """The joints of a Lite variant, from its MJCF in ``lite-description``."""
+    """Return the joint names of a Lite variant from its MJCF, without the free joint."""
     model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(variant)))
     return [
         mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint)
@@ -304,7 +312,7 @@ def robot_joints(variant: str) -> list[str]:
 
 
 def read_source_fps(path: Path) -> int | None:
-    """The rate of the source clip, from the base layer, if the store holds one."""
+    """Return the rate of the source clip from its base layer, or None if the store has none."""
     if not path.exists():
         return None
     for chunk in RrdReader(path).stream():
@@ -314,11 +322,10 @@ def read_source_fps(path: Path) -> int | None:
 
 
 def clip_paths(source: str) -> dict[str, str]:
-    """Map each motion name of ``source`` back to the path of its clip, from the cache.
+    """Map each motion name of ``source`` to the path of its clip, from the cache.
 
-    A motion name flattens the path, so the directories a category comes from survive
-    only in the downloaded source. A motion whose source is not in the cache maps to
-    nothing.
+    A motion name flattens the path of its clip, so only the downloaded source keeps the
+    folders that give the category. The map leaves out each clip that is not in the cache.
     """
     spec = SOURCES[source]
     clip_dir = CACHE_ROOT / source / spec.clip_dir
@@ -329,14 +336,14 @@ def clip_paths(source: str) -> dict[str, str]:
 
 
 def category(clip: str) -> str:
-    """The group a clip belongs to.
+    """Return the category of a clip.
 
-    A taxonomy of numbered folders, as MotionDecode's, groups by its section, the second level:
-    ``1.14.Dance_and_Performance/1.14.5.Ballet/...`` gives ``Ballet``, and a clip one level
-    deep, ``4. Martial_Arts/...``, gives ``Martial arts``. Otherwise the top folder names the
-    group: ``CMU/07/07_01`` gives ``CMU``, and ``bowing_forward/episode_00001`` gives
-    ``Bowing forward``. A flat LAFAN1 take, ``fallAndGetUp2_subject3``, gives the action its
-    name opens with, ``Fall and get up``.
+    A taxonomy of numbered folders, such as the one of MotionDecode, gives its section at
+    the second level: ``1.14.Dance_and_Performance/1.14.5.Ballet/...`` gives ``Ballet``. A
+    clip one level deep, ``4. Martial_Arts/...``, gives ``Martial arts``. Otherwise the top
+    folder is the category: ``CMU/07/07_01`` gives ``CMU``, and
+    ``bowing_forward/episode_00001`` gives ``Bowing forward``. A flat LAFAN1 take,
+    ``fallAndGetUp2_subject3``, gives the action at the start of its name, ``Fall and get up``.
     """
     folders = clip.split("/")[:-1]
     numbered = [folder for folder in folders[:2] if re.match(r"\d+(\.\d+)*\.\s*[A-Za-z]", folder)]
@@ -349,25 +356,15 @@ def category(clip: str) -> str:
     return " ".join(re.findall(r"[A-Z]?[a-z]+", action)).capitalize() or clip
 
 
-def preview_window(joint_pos: np.ndarray, frames: int) -> tuple[int, int]:
-    """The ``frames`` long window in which the joints travel furthest, as ``[start, stop)``."""
-    if len(joint_pos) <= frames:
-        return 0, len(joint_pos)
-    speed = np.abs(np.diff(joint_pos, axis=0)).sum(axis=1)
-    travelled = np.concatenate([[0.0], np.cumsum(speed)])
-    start = int(np.argmax(travelled[frames - 1:] - travelled[:-(frames - 1)]))
-    return start, start + frames
-
-
 def write_robot(urdf: Path, out: Path) -> float:
-    """Write ``robot.json`` and ``robot.bin`` from a URDF, and return the size in MB.
+    """Write ``robot.json`` and ``robot.bin`` from a URDF, and return the mesh size in MB.
 
-    Each visual mesh is moved into the frame of its link and has its repeated vertices
-    merged, so the page places it with the link alone. The page shades it flat, which
-    an STL, a mesh with a normal per face, implies.
+    ``robot.bin`` holds each visual mesh in the frame of its link, with its repeated vertices
+    merged, so the page places the mesh with the pose of the link alone. The page shades the
+    mesh flat, as an STL implies with its normal per face.
     """
     root = ET.parse(urdf).getroot()
-    # A visual can name a material the robot defines once, at the top of the URDF.
+    # A visual can name a material that the URDF defines once, at the top level.
     materials = {material.get("name"): material for material in root.findall("material")}
     blocks: list[bytes] = []
     offset = 0
@@ -382,14 +379,13 @@ def write_robot(urdf: Path, out: Path) -> float:
             scale = np.array(mesh.get("scale", "1 1 1").split(), dtype=np.float64)
             vertices, triangles = _read_stl(urdf.parent / mesh.get("filename"))
             vertices = (vertices * scale) @ Rotation.from_euler("xyz", rpy).as_matrix().T + xyz
-            color = _color(visual.find("material"), materials)
             vertex_bytes = vertices.astype("<f4").tobytes()
             triangle_bytes = triangles.astype("<u4").tobytes()
             visuals.append({
                 "offset": offset,
                 "vertices": len(vertices),
                 "triangles": len(triangles),
-                "color": color,
+                "color": _color(visual.find("material"), materials),
             })
             blocks += [vertex_bytes, triangle_bytes]
             offset += len(vertex_bytes) + len(triangle_bytes)
@@ -420,7 +416,7 @@ def write_robot(urdf: Path, out: Path) -> float:
 
 
 def _origin(element: ET.Element | None) -> tuple[np.ndarray, np.ndarray]:
-    """The ``xyz`` and ``rpy`` of a URDF origin, which default to zero."""
+    """Return the ``xyz`` and ``rpy`` of a URDF origin, which are zero by default."""
     if element is None:
         return np.zeros(3), np.zeros(3)
     return (
@@ -430,7 +426,7 @@ def _origin(element: ET.Element | None) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _color(material: ET.Element | None, materials: dict[str, ET.Element]) -> list[float]:
-    """The RGBA of a visual's material, inline or named, and light grey without one."""
+    """Return the RGBA of a visual's material, inline or by name, or light grey without one."""
     if material is not None and material.find("color") is None:
         material = materials.get(material.get("name"))
     if material is None or material.find("color") is None:

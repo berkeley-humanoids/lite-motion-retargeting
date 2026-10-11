@@ -1,12 +1,13 @@
 // The motion browser. One three.js scene holds two figures that can play a motion: the robot
 // of the URDF, and a VRM character. The cards and the viewer each pose the figure on show and
-// draw it in turn, so the page loads each model once.
+// draw it in turn, so the page loads each model only once.
 //
-// scripts/build_site.py writes a collection of motions: a folder of index.json.gz, the robot,
-// and packs. collections.json lists the collections the page shows: data/ beside it, or
-// folders on the Hugging Face Hub. A motion is a byte range of a pack, float32 rows of
-// [pelvis xyz, pelvis quaternion xyzw, then the angle of each joint its index entry lists].
-// character.vrm beside the page is the character. Without it, the page shows the robot only.
+// scripts/build_site.py writes a collection of motions: a folder with index.json.gz, the
+// robot and the packs. collections.json lists the collections that the page shows: data/
+// beside the page, or folders on the Hugging Face Hub. A motion is a byte range of a pack,
+// with float32 rows of [pelvis xyz, pelvis quaternion xyzw, then the angle of each joint
+// that its index entry lists]. character.vrm beside the page is the character. Without it,
+// the page shows only the robot.
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -55,7 +56,7 @@ async function fetchGzipJson(url, headers) {
 }
 
 // The Hub answers each read of a file with a redirect to its CDN. The page reads a pack at
-// the address it was last sent to, and goes back through the Hub once that expires.
+// the CDN address of its last read, and goes back through the Hub when that address expires.
 const packAddresses = new Map();  // pack URL -> CDN URL
 
 async function fetchRange(url, offset, bytes, headers) {
@@ -72,13 +73,13 @@ async function fetchRange(url, offset, bytes, headers) {
   return new Float32Array(await response.arrayBuffer());
 }
 
-// The rows of `entry`, or of its preview, from the pack of its collection that holds them.
+// Fetch the rows of `entry` at `[pack, offset, bytes]`: its motion or its preview.
 function fetchRows(entry, [pack, offset, bytes]) {
   const collection = entry.collection;
   return fetchRange(`${collection.url}${collection.packs[pack]}`, offset, bytes, collection.headers);
 }
 
-// Load every collection the visitor may read, and merge them into one index. A private
+// Load each collection that the visitor can read, and merge them into one index. A private
 // collection needs a signed-in visitor whose account can read it.
 async function loadCollections() {
   const listed = (await fetchJson(COLLECTIONS)).filter((collection) => !collection.private || session);
@@ -92,7 +93,7 @@ async function loadCollections() {
     if (result.status === "fulfilled") collections.push(result.value);
     else console.error(`Collection ${listed[i].url} did not load:`, result.reason);
   }
-  if (collections.length === 0) throw new Error(`No collection of ${COLLECTIONS} loaded`);
+  if (collections.length === 0) throw new Error(`No collection in ${COLLECTIONS} loaded`);
 
   const first = collections[0].data;
   const merged = {
@@ -101,7 +102,7 @@ async function loadCollections() {
   };
   for (const { data, ...collection } of collections) {
     if (data.joint_names.join() !== merged.joint_names.join()) {
-      console.error(`Collection ${collection.url} moves other joints than ${collections[0].url}, and is left out`);
+      console.error(`Collection ${collection.url} has other joints than ${collections[0].url}, so the page skips it`);
       continue;
     }
     collection.packs = data.packs;
@@ -109,7 +110,7 @@ async function loadCollections() {
     for (const entry of data.motions) {
       entry.collection = collection;
       entry.joints = data.joint_sets[entry.joint_set];
-      // An index built before it named the driven joints names the joints that move.
+      // An older index has no active_sets, so take the joints that move as the driven joints.
       entry.active = data.active_sets?.[entry.active_set] ?? entry.joints;
       merged.motions.push(entry);
     }
@@ -119,8 +120,8 @@ async function loadCollections() {
 
 // ── Sign in ──────────────────────────────────────────────────────────────────
 
-// A static Space with `hf_oauth: true` in its card defines the client the Hub signs in for.
-// Anywhere else the page has no sign-in, and shows only the public collections.
+// A static Space with `hf_oauth: true` in its card defines the OAuth client of the sign-in.
+// Elsewhere the page has no sign-in, and shows only the public collections.
 const oauthClient = window.huggingface?.variables?.OAUTH_CLIENT_ID;
 let session = null;  // { accessToken, accessTokenExpiresAt, userInfo } of a signed-in visitor
 
@@ -144,7 +145,7 @@ function writeStorage(key, value) {
 // The session kept from an earlier visit, or the one the Hub just sent the visitor back with.
 async function restoreSession() {
   if (!oauthClient) return null;
-  let result = null;
+  let result;
   try {
     result = JSON.parse(readStorage(SESSION_KEY));
   } catch {
@@ -157,8 +158,8 @@ async function restoreSession() {
     } catch (error) {
       console.error(error);
     }
-    // The code is spent, so a reload must not offer it again.
-    setHash(location.pathname + location.hash);
+    // The Hub accepts a code only once, so remove it before a reload sends it again.
+    replaceUrl(location.pathname + location.hash);
     if (result) writeStorage(SESSION_KEY, JSON.stringify(result));
   }
   if (result && new Date(result.accessTokenExpiresAt) <= new Date()) {
@@ -170,7 +171,7 @@ async function restoreSession() {
 
 async function signIn() {
   const { oauthLoginUrl } = await import("@huggingface/hub");
-  // The Hub sends the visitor back to this page, without the motion the hash opens.
+  // The Hub sends the visitor back to this page, without the hash of the open motion.
   location.href = await oauthLoginUrl({
     redirectUrl: location.origin + location.pathname,
     scopes: window.huggingface.variables.OAUTH_SCOPES,
@@ -198,7 +199,7 @@ function showAccount() {
     account.replaceChildren(avatar, name, button);
   } else {
     button.textContent = "Sign in with Hugging Face";
-    button.title = "See the collections your Hugging Face account can read";
+    button.title = "Show the collections that your Hugging Face account can read";
     button.addEventListener("click", signIn);
     account.replaceChildren(button);
   }
@@ -207,12 +208,13 @@ function showAccount() {
 
 // ── Robot ────────────────────────────────────────────────────────────────────
 
-// A figure is what a clip poses. `object` is what the stage draws, `root` is placed where
-// the clip puts the pelvis, and `joints` are what the figure turns, by the name of the robot
-// joint. `update(clip, time)` carries a pose the clip has set to what the stage draws.
+// A figure is a model that a clip can pose. The stage draws `object`. The clip puts `root` at
+// the pelvis, and sets each of `joints`, by robot joint name, with `setJoint(joint, value)`.
+// `posedBy` is the clip that posed the figure last. `update(clip, time)` applies the pose to
+// what the stage draws.
 
 // Build the link tree of robot.json, with the meshes of robot.bin. Each joint becomes two
-// groups: one fixed at the joint origin, and one inside it that the joint angle turns.
+// groups: one fixed at the joint origin, and one inside it that the joint moves.
 function buildRobot(description, buffer) {
   const materials = new Map();
   const material = ([r, g, b]) => {
@@ -222,7 +224,7 @@ function buildRobot(description, buffer) {
         color: new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace),
         roughness: 0.55,
         metalness: 0.05,
-        // An STL has a normal per face, so the mesh carries none and is shaded flat.
+        // An STL has a normal per face, so the mesh has no vertex normals and is shaded flat.
         flatShading: true,
       }));
     }
@@ -271,19 +273,20 @@ function setJoint(joint, value) {
 // ── Character ────────────────────────────────────────────────────────────────
 
 // A VRM is y-up and faces +z, with its left along +x. The robot is z-up and faces +x, with
-// its left along +y. This turns the first frame into the second.
+// its left along +y. VRM_TO_ROBOT turns the VRM frame into the robot frame.
 const VRM_TO_ROBOT = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(
   new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(1, 0, 0),
 ));
 const ROBOT_TO_VRM = VRM_TO_ROBOT.clone().invert();
 
-// Seconds. The spring bones of the hair and the clothes follow a motion that plays on by up
-// to this much, and start over from rest where it jumps further, or back.
+// Seconds. If a motion plays on by up to this much, the spring bones of the hair and the
+// clothes follow it. If it jumps further, or back, they start again from rest.
 const SPRING_STEP = 0.1;
 
-// The bones of the character, each with the robot joints that turn it, in the order the URDF
-// chains them. Where the robot stacks yaw, pitch and roll joints at one point, the character
-// has one ball joint, and its bone takes all of them. The pelvis of the robot moves the hips.
+// The bones of the character, each with the robot joints that turn it, in the order that the
+// URDF chains them. Where the robot stacks yaw, pitch and roll joints at one point, the
+// character has one ball joint, and its bone takes all of them. The pelvis of the robot moves
+// the hips.
 function characterBones() {
   const bones = {
     chest: ["waist_yaw", "waist_roll", "waist_pitch"],
@@ -311,7 +314,7 @@ function characterBones() {
 
 // The axis of each robot joint with the robot at rest, in the frame of the character. At rest
 // both stand in a T-pose and face the same way, so a joint turns the bone of the character
-// about the same axis it turns the robot.
+// about the same axis as the robot.
 function restAxes(description) {
   const byChild = new Map(description.joints.map((joint) => [joint.child, joint]));
   const rotations = new Map([[description.root, new THREE.Quaternion()]]);
@@ -330,7 +333,7 @@ function restAxes(description) {
   return axes;
 }
 
-// The character, or null if the page has none.
+// Load the character, or return null if the page has none.
 async function loadVrm(url) {
   const loader = new GLTFLoader();
   loader.register((parser) => new VRMLoaderPlugin(parser));
@@ -340,15 +343,16 @@ async function loadVrm(url) {
     VRMUtils.combineSkeletons(gltf.scene);
     return gltf.userData.vrm;
   } catch (error) {
-    console.warn(`The page shows the robot only, as ${url} did not load:`, error);
+    console.warn(`${url} did not load, so the page shows only the robot:`, error);
     return null;
   }
 }
 
 // Build the character as a figure that takes the joint angles of the robot. Its bones turn on
-// the normalized rig of the VRM, where every bone rests unturned in the frame of the model.
-// `sole` is how far below the pelvis the robot reaches at rest. The character stands with its
-// hip joints about the same point as those of the robot, and its soles as low.
+// the normalized rig of the VRM, where each bone at rest has no rotation in the frame of the
+// model. `sole` is the height of the lowest point of the robot at rest, relative to its
+// pelvis. The character puts its hip joints at about the same point as the robot, and its
+// soles at the same height.
 function buildCharacter(vrm, description, sole) {
   const humanoid = vrm.humanoid;
   const axes = restAxes(description);
@@ -381,7 +385,7 @@ function buildCharacter(vrm, description, sole) {
     node.frustumCulled = false;  // a skinned mesh keeps the bounds of its rest pose
     if (node.isMesh) node.castShadow = true;
   });
-  // A spring bone falls along a direction of the world: -y for a VRM, -z on this stage.
+  // Gravity pulls a spring bone along a world direction: -y for a VRM, -z on this stage.
   for (const joint of vrm.springBoneManager?.joints ?? []) joint.settings.gravityDir.applyQuaternion(VRM_TO_ROBOT);
 
   const root = new THREE.Object3D();
@@ -426,7 +430,7 @@ class Clip {
     this.targets = new Map();  // figure -> its joint for each joint of the clip
   }
 
-  // Pose `figure` at `time` seconds, between the two frames around it.
+  // Pose `figure` at `time` seconds, interpolated between the two frames around it.
   pose(figure, time) {
     const f = THREE.MathUtils.clamp(time * this.fps, 0, this.frames - 1);
     const i = Math.floor(f);
@@ -435,8 +439,9 @@ class Clip {
     const p = i * this.stride;
     const q = Math.min(i + 1, this.frames - 1) * this.stride;
 
-    // A joint the figure lacks is skipped. A joint this clip does not list is zero, and the
-    // clip that posed the figure last may have moved it.
+    // The clip skips a joint that the figure does not have. A joint that the clip does not
+    // list is zero, but the clip that posed the figure last can have moved it, so a new clip
+    // sets each joint to zero first.
     if (!this.targets.has(figure)) this.targets.set(figure, this.names.map((name) => figure.joints.get(name) ?? null));
     const targets = this.targets.get(figure);
     if (figure.posedBy !== this) {
@@ -460,7 +465,7 @@ class Clip {
     return Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
   }
 
-  // The pelvis track over the floor, as a line a few millimetres above it.
+  // The pelvis path over the floor, as a line a few millimetres above it.
   track() {
     const step = Math.max(1, Math.floor(this.frames / 4000));
     const points = [];
@@ -495,8 +500,8 @@ function createStage(figures) {
   );
   scene.add(grid, floor, trail, ...figures.map((figure) => figure.object));
 
-  // Keep the floor, the grid, and the shadow of the key light around the figure, so a
-  // motion can cross any distance. The grid moves in whole metres, so its lines stay put.
+  // Keep the floor, the grid and the shadow of the key light around the figure, so a motion
+  // can cross any distance. The grid moves in whole metres, so its lines stay in place.
   function center(x, y) {
     grid.position.set(Math.round(x), Math.round(y), 0.001);
     floor.position.set(x, y, 0);
@@ -507,8 +512,8 @@ function createStage(figures) {
 }
 
 // A grid of `step` cells over a `size` square of the floor, as one segment per cell edge.
-// Lines that span the whole floor run behind the camera, and some renderers clip those
-// wrongly, which leaves the floor under the robot empty.
+// A line that spans the whole floor runs behind the camera. Some renderers clip such a line
+// incorrectly, and the floor under the robot shows no grid.
 function floorGrid(size, step, color) {
   const cells = Math.round(size / step);
   const points = [];
@@ -558,10 +563,10 @@ let index = null;
 const figures = {};  // "character" and "robot", each a figure
 let figure = null;   // the one on show
 let stage = null;
-const byName = new Map();
-// `group` is a category of one source, as "<source>:<category>", or null for all. `drives`
-// holds the joint groups a motion must drive in full.
-const state = { query: [], sources: new Set(), drives: new Set(), group: null, sort: "name" };
+const byName = new Map();  // motion name -> index entry
+// `categoryKey` is the picked category of one source, as "<source>:<category>", or null for
+// all. `drives` holds the joint groups that a motion must drive in full.
+const state = { query: [], sources: new Set(), drives: new Set(), categoryKey: null, sort: "name" };
 let filtered = [];
 let shown = 0;
 
@@ -637,7 +642,7 @@ async function loadPreview(card) {
   }
 }
 
-// Free the pixels of a card far off screen. It draws again when it comes back.
+// Free the pixels of a card far off screen. The card draws again when it comes back.
 function release(card) {
   posterQueue.delete(card);
   card.canvas.width = 0;
@@ -645,8 +650,9 @@ function release(card) {
   card.drawn = false;
 }
 
-// Pose the figure as the card's clip has it, draw it, and copy the frame into the card.
-// `follow` is how far the camera moves toward the pelvis: 1 jumps there.
+// Pose the figure as the clip of the card has it, draw it, and copy the frame into the card.
+// `follow` is the fraction of the distance to the pelvis that the camera moves: 1 moves all
+// the way.
 function drawCard(card, follow) {
   const width = card.canvas.clientWidth;
   const height = card.canvas.clientHeight;
@@ -675,13 +681,20 @@ function drawCard(card, follow) {
   card.drawn = true;
 }
 
-// Draw the cards waiting for a still frame, a few milliseconds' worth per frame of the page.
+// Draw the cards that wait for a still frame, for about 10 ms per frame of the page.
 function drawPosters() {
   const start = performance.now();
   for (const card of posterQueue) {
     if (performance.now() - start > 10) break;
     posterQueue.delete(card);
     if (card.visible && card.clip && card !== hovered) drawCard(card, 1);
+  }
+}
+
+// Queue a new still frame for each visible card.
+function redrawCards() {
+  for (const card of cards.values()) {
+    if (card.visible) posterQueue.add(card);
   }
 }
 
@@ -738,7 +751,8 @@ function formatTotal(seconds) {
   return `${Math.round(seconds)} s`;
 }
 
-// A row of the filter rail. A `check` row toggles one of several; the others pick one.
+// A row of the filter rail. A `check` row toggles one of several options. Another row picks
+// one option.
 function filterRow(label, tally, pressed, check, onClick) {
   const button = document.createElement("button");
   button.type = "button";
@@ -752,54 +766,50 @@ function filterRow(label, tally, pressed, check, onClick) {
   return button;
 }
 
-function matchesQuery(entry) {
-  return state.query.every((word) => entry.haystack.includes(word));
+// Add `key` to `set` if it is not there, or else remove it, and apply the filters again.
+function toggle(set, key) {
+  if (!set.delete(key)) set.add(key);
+  applyFilters();
 }
 
-// Apply the filters: redraw the source and category lists, and start the grid over.
-function update() {
-  const searched = index.motions.filter(matchesQuery);
+// Apply the filters: redraw the source, drive and category lists, and start the grid again.
+function applyFilters() {
+  const searched = index.motions.filter((entry) => state.query.every((word) => entry.haystack.includes(word)));
   elements.sources.replaceChildren(...Object.entries(index.sources).map(([key, source]) => {
     const tally = searched.filter((entry) => entry.source === key).length;
-    return filterRow(source.title, tally, state.sources.has(key), true, () => {
-      if (state.sources.has(key)) state.sources.delete(key);
-      else state.sources.add(key);
-      update();
-    });
+    return filterRow(source.title, tally, state.sources.has(key), true, () => toggle(state.sources, key));
   }));
 
   const picked = searched.filter((entry) => state.sources.has(entry.source));
   elements.drives.replaceChildren(...index.groups.map(({ title }) => {
     const tally = picked.filter((entry) => entry.drives.has(title)).length;
-    return filterRow(title, tally, state.drives.has(title), true, () => {
-      if (state.drives.has(title)) state.drives.delete(title);
-      else state.drives.add(title);
-      update();
-    });
+    return filterRow(title, tally, state.drives.has(title), true, () => toggle(state.drives, title));
   }));
 
-  // Each source groups its clips its own way, so each lists its own categories.
+  // Each source has its own categories, so the list shows them by source.
   const matches = picked.filter((entry) => [...state.drives].every((title) => entry.drives.has(title)));
-  const tallies = new Map();
-  for (const entry of matches) tallies.set(entry.group, (tallies.get(entry.group) ?? 0) + 1);
-  if (state.group && !tallies.has(state.group)) state.group = null;
-  const pick = (group) => () => {
-    state.group = state.group === group ? null : group;
-    update();
+  const tallies = new Map();  // category key -> motions
+  for (const entry of matches) tallies.set(entry.categoryKey, (tallies.get(entry.categoryKey) ?? 0) + 1);
+  if (state.categoryKey && !tallies.has(state.categoryKey)) state.categoryKey = null;
+  const pick = (key) => () => {
+    state.categoryKey = state.categoryKey === key ? null : key;
+    applyFilters();
   };
-  const rows = [filterRow("All", matches.length, state.group === null, false, pick(null))];
-  for (const [key, source] of Object.entries(index.sources)) {
-    const groups = [...tallies.keys()].filter((group) => group.startsWith(`${key}:`)).sort();
-    if (groups.length === 0) continue;
+  const rows = [filterRow("All", matches.length, state.categoryKey === null, false, pick(null))];
+  for (const [source, { title }] of Object.entries(index.sources)) {
+    const keys = [...tallies.keys()].filter((key) => key.startsWith(`${source}:`)).sort();
+    if (keys.length === 0) continue;
     const heading = document.createElement("p");
     heading.className = "group-label";
-    heading.textContent = source.title;
-    rows.push(heading, ...groups.map((group) =>
-      filterRow(group.slice(key.length + 1), tallies.get(group), state.group === group, false, pick(group))));
+    heading.textContent = title;
+    rows.push(heading, ...keys.map((key) =>
+      filterRow(key.slice(source.length + 1), tallies.get(key), state.categoryKey === key, false, pick(key))));
   }
   elements.categories.replaceChildren(...rows);
 
-  filtered = matches.filter((entry) => !state.group || entry.group === state.group).sort(SORTS[state.sort]);
+  filtered = matches
+    .filter((entry) => !state.categoryKey || entry.categoryKey === state.categoryKey)
+    .sort(SORTS[state.sort]);
   const seconds = filtered.reduce((sum, entry) => sum + entry.seconds, 0);
   elements.count.innerHTML =
     `<strong>${filtered.length.toLocaleString()}</strong> motions · ${formatTotal(seconds)} of motion`;
@@ -814,7 +824,7 @@ function update() {
   elements.grid.replaceChildren();
   shown = 0;
   if (filtered.length === 0) {
-    showNotice("No motion matches", "Clear the search, or pick another source or category.");
+    showNotice("No motion matches", "Clear the search, or change the filters.");
   } else {
     elements.notice.hidden = true;
   }
@@ -830,8 +840,8 @@ function appendPage() {
     cardObserver.observe(card.element);
   }
   shown += page.length;
-  // Observing again reports the sentinel at once, so a page that leaves it in view loads
-  // the next one too.
+  // A new observation reports the sentinel at once. Thus if the sentinel stays in view after
+  // a page, the next page loads too.
   moreObserver.unobserve(elements.more);
   if (shown < filtered.length) moreObserver.observe(elements.more);
 }
@@ -887,7 +897,7 @@ async function openViewer(entry) {
   viewer.entry = entry;
   viewer.clip = null;
   describe(entry);
-  setHash(`#${entry.name}`);
+  replaceUrl(`#${entry.name}`);
   elements.loading.textContent = "Loading motion";
   elements.loading.hidden = false;
 
@@ -896,10 +906,10 @@ async function openViewer(entry) {
     rows = await loadMotion(entry);
   } catch (error) {
     motionCache.delete(entry.name);
-    if (request === viewer.request) elements.loading.textContent = `Could not load this motion: ${error.message}`;
+    if (request === viewer.request) elements.loading.textContent = `This motion did not load: ${error.message}`;
     return;
   }
-  if (request !== viewer.request) return;  // another motion was opened meanwhile
+  if (request !== viewer.request) return;  // the visitor opened another motion meanwhile
 
   const clip = new Clip(rows, entry, index.joint_names);
   viewer.clip = clip;
@@ -916,8 +926,9 @@ async function openViewer(entry) {
   elements.loading.hidden = true;
 }
 
-// Name the open motion in the URL, so a link opens it. A sandboxed frame may refuse.
-function setHash(url) {
+// Replace the URL without a reload. The hash names the open motion, so a link opens it. A
+// sandboxed frame can refuse the change.
+function replaceUrl(url) {
   try {
     history.replaceState(null, "", url);
   } catch (error) {
@@ -930,11 +941,11 @@ function closeViewer() {
   viewer.clip = null;
   elements.viewer.hidden = true;
   document.body.classList.remove("locked");
-  setHash(location.pathname + location.search);
+  replaceUrl(location.pathname + location.search);
   viewer.returnFocus?.focus?.();
 }
 
-// The list Previous and Next walk: the grid as filtered, or every motion if it left the grid.
+// Previous and Next walk the filtered grid, or every motion if the open motion is not in it.
 function neighbour(step) {
   const list = filtered.includes(viewer.entry) ? filtered : index.motions;
   return list[list.indexOf(viewer.entry) + step] ?? null;
@@ -951,7 +962,7 @@ function sourceRate(entry) {
   return `${entry.source_fps} Hz, resampled to ${entry.fps} Hz`;
 }
 
-// The joint groups `entry` drives, in full or in part, and those that hold zero.
+// The joint groups that `entry` drives, in full or in part, and the groups that hold zero.
 function describeDrives(entry) {
   const active = new Set(entry.active);
   const driven = [];
@@ -968,7 +979,7 @@ function describeDrives(entry) {
   return `${total}: ${list(driven)}${rest}`;
 }
 
-// How many of the joints of each Lite robot `entry` drives.
+// The number of joints of each Lite robot that `entry` drives.
 function describeRobots(entry) {
   const active = new Set(entry.active);
   return index.robots
@@ -981,6 +992,11 @@ function describe(entry) {
   elements.source.textContent = `${source.title} · ${entry.category}`;
   elements.name.textContent = entry.name;
 
+  const link = document.createElement("a");
+  link.href = source.url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = source.url.includes("huggingface.co") ? "Source dataset on the Hub" : "Source dataset";
   const rows = [
     ["Length", `${formatLength(entry.seconds)} · ${entry.frames.toLocaleString()} frames at ${entry.fps} Hz`],
     ["Source rate", sourceRate(entry)],
@@ -990,26 +1006,16 @@ function describe(entry) {
     ["Robots", describeRobots(entry)],
     ["Clip", entry.clip ?? "Not in the local download of the source", "mono"],
     ["License", source.license],
+    ["Upstream", link],
   ];
-  const list = [];
-  for (const [term, value, style] of rows) {
+  elements.stats.replaceChildren(...rows.flatMap(([term, value, style]) => {
     const dt = document.createElement("dt");
     dt.textContent = term;
     const dd = document.createElement("dd");
-    dd.textContent = value;
+    dd.append(value);
     if (style) dd.className = style;
-    list.push(dt, dd);
-  }
-  const link = document.createElement("a");
-  link.href = source.url;
-  link.target = "_blank";
-  link.rel = "noopener";
-  link.textContent = source.url.includes("huggingface.co") ? "Source dataset on the Hub" : "Source dataset";
-  const dt = document.createElement("dt");
-  dt.textContent = "Upstream";
-  const dd = document.createElement("dd");
-  dd.append(link);
-  elements.stats.replaceChildren(...list, dt, dd);
+    return [dt, dd];
+  }));
 
   elements.openRerun.hidden = !source.hub;
   if (source.hub) elements.openRerun.href = index.viewer + encodeURIComponent(`${source.hub}${entry.name}.rrd`);
@@ -1036,9 +1042,10 @@ function stepFrame(step) {
 function resizeViewer() {
   const width = elements.canvas.clientWidth;
   const height = elements.canvas.clientHeight;
-  const ratio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
   if (!width || !height) return;
-  if (elements.canvas.width !== Math.round(width * ratio) || elements.canvas.height !== Math.round(height * ratio)) {
+  const ratio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
+  // setSize rounds the canvas size down, so compare with the rounded-down size.
+  if (elements.canvas.width !== Math.floor(width * ratio) || elements.canvas.height !== Math.floor(height * ratio)) {
     viewer.renderer.setPixelRatio(ratio);
     viewer.renderer.setSize(width, height, false);
     viewer.camera.aspect = width / height;
@@ -1060,8 +1067,8 @@ function tickViewer(dt) {
   }
   clip.pose(figure, viewer.time);
 
-  // Following moves the camera and its target together, so the angle the viewer picked
-  // stays while the figure crosses the floor.
+  // Follow moves the camera and its target together, so the view angle that the visitor
+  // picked stays the same while the figure crosses the floor.
   const { x, y } = figure.root.position;
   if (elements.follow.checked) {
     const target = viewer.controls.target;
@@ -1137,9 +1144,7 @@ function showFigure(name) {
     button.setAttribute("aria-pressed", String(button.dataset.figure === name));
   }
   writeStorage(FIGURE_KEY, name);
-  for (const card of cards.values()) {
-    if (card.visible) posterQueue.add(card);
-  }
+  redrawCards();
 }
 
 // ── Start ────────────────────────────────────────────────────────────────────
@@ -1180,13 +1185,13 @@ async function main() {
     elements.count.textContent = "No motions loaded";
     showNotice(
       "The motion data did not load",
-      "Build it with <code>uv run scripts/build_site.py</code>, then serve this directory with " +
-      "<code>uv run scripts/serve.py</code>. A page opened from the file system cannot read it.",
+      "Build the data with <code>uv run scripts/build_site.py</code>. Then serve this directory with " +
+      "<code>uv run scripts/serve.py</code>. A page that you open from the file system cannot read the data.",
     );
     return;
   }
-  // Most motions share a few driven sets, so work out the groups of each set once.
-  const drivesOf = new Map();
+  // Most motions share a few sets of driven joints, so find the groups of each set only once.
+  const drivesOf = new Map();  // driven joints -> the groups that they drive in full
   for (const entry of index.motions) {
     if (!drivesOf.has(entry.active)) {
       const active = new Set(entry.active);
@@ -1195,11 +1200,10 @@ async function main() {
         .map(({ title }) => title)));
     }
     entry.drives = drivesOf.get(entry.active);
-  }
-  for (const entry of index.motions) {
-    const source = index.sources[entry.source];
-    entry.group = `${entry.source}:${entry.category}`;
-    entry.haystack = [entry.name, entry.clip ?? "", entry.category, source.title].join(" ").toLowerCase();
+    // Two sources can share a category name, so the source is part of the key.
+    entry.categoryKey = `${entry.source}:${entry.category}`;
+    entry.haystack = [entry.name, entry.clip ?? "", entry.category, index.sources[entry.source].title]
+      .join(" ").toLowerCase();
     byName.set(entry.name, entry);
   }
   state.sources = new Set(Object.keys(index.sources));
@@ -1216,19 +1220,15 @@ async function main() {
 
   elements.search.addEventListener("input", () => {
     state.query = elements.search.value.toLowerCase().split(/\s+/).filter(Boolean);
-    update();
+    applyFilters();
   });
   elements.sort.addEventListener("change", () => {
     state.sort = elements.sort.value;
-    update();
+    applyFilters();
   });
-  // A wider or narrower grid changes the size of every card, and so every still frame.
-  new ResizeObserver(() => {
-    for (const card of cards.values()) {
-      if (card.visible) posterQueue.add(card);
-    }
-  }).observe(elements.grid);
-  update();
+  // A wider or narrower grid changes the size of each card, and thus each still frame.
+  new ResizeObserver(redrawCards).observe(elements.grid);
+  applyFilters();
 
   window.addEventListener("hashchange", openFromHash);
   openFromHash();

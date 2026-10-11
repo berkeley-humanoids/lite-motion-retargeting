@@ -1,4 +1,4 @@
-/* Layout: a filter rail beside a contact sheet of stage tiles; a motion opens onto a full stage. */
+/* Layout: a filter rail beside a grid of stage tiles. A motion opens on a full-screen stage. */
 :root {
   --paper: #edf0f4;
   --surface: #ffffff;
@@ -9,7 +9,7 @@
   --accent-ink: #ffffff;
   --accent-soft: #dbe6f3;
   --gold: #e8a612;
-  /* The stage is a room, the same in either theme: a deep blue the white robot reads against. */
+  /* The stage is the same room in either theme: a deep blue that the white robot shows against. */
   --stage: #12233a;
   --stage-ink: #e6edf7;
   --stage-muted: #9fb1c9;
@@ -25,7 +25,7 @@
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root {
     --paper: #0b1119;
     --surface: #121a25;
     --ink: #e5eaf1;
@@ -36,17 +36,6 @@
     --accent-soft: #1b2b40;
     color-scheme: dark;
   }
-}
-:root[data-theme="dark"] {
-  --paper: #0b1119;
-  --surface: #121a25;
-  --ink: #e5eaf1;
-  --muted: #92a0b4;
-  --line: #243246;
-  --accent: #8ab8f0;
-  --accent-ink: #0b1119;
-  --accent-soft: #1b2b40;
-  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -113,7 +102,7 @@ button, input, select { font: inherit; color: inherit; }
 .filters {
   display: flex; flex-direction: column; gap: 24px;
   align-self: start; position: sticky; top: 16px;
-  /* A rail taller than the window would hide its end, so it scrolls on its own. */
+  /* A rail taller than the window scrolls on its own, so its end stays in reach. */
   max-height: calc(100vh - 32px); overflow-y: auto; scrollbar-width: thin;
 }
 .filters h2 {
@@ -121,7 +110,7 @@ button, input, select { font: inherit; color: inherit; }
   font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--muted);
 }
-.source-list, .category-list { display: flex; flex-direction: column; gap: 2px; scrollbar-width: thin; }
+.filter-list { display: flex; flex-direction: column; gap: 2px; scrollbar-width: thin; }
 .filter-row {
   display: flex; align-items: center; gap: 8px;
   width: 100%;
@@ -153,7 +142,6 @@ button, input, select { font: inherit; color: inherit; }
   font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums;
   opacity: 0.75;
 }
-.filter-row input { accent-color: var(--accent); margin: 0; }
 
 .toolbar {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px;
@@ -201,7 +189,7 @@ button, input, select { font: inherit; color: inherit; }
 }
 .tile canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .tile::before {
-  /* Shown until the robot is drawn: a faint floor line, so an empty tile still reads as a stage. */
+  /* A faint floor line until the card draws its figure, so an empty tile still looks like a stage. */
   content: ""; position: absolute; left: 18%; right: 18%; bottom: 22%;
   height: 1px; background: var(--stage-muted); opacity: 0.25;
 }
@@ -351,7 +339,7 @@ kbd {
   .masthead { padding: 20px 16px 16px; }
   .layout { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 16px 16px 40px; }
   .filters { position: static; gap: 12px; max-height: none; overflow: visible; }
-  .source-list, .category-list { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
+  .filter-list { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
   .filter-row { width: auto; flex: none; border: 1px solid var(--line); border-radius: 999px; }
   .group-label { flex: none; align-self: center; margin: 0 0 0 6px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px 12px; }

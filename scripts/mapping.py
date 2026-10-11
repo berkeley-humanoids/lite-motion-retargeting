@@ -144,6 +144,21 @@ def calibrate(lite: mujoco.MjModel, human_rest: np.ndarray) -> Calibration:
     )
 
 
+def driven_joints(lite: mujoco.MjModel) -> tuple[str, ...]:
+    """The joints the goals drive: every joint between the root and a link of :data:`LITE_PAIRS`.
+
+    No goal lies beyond a hand, so the fingers are not among them.
+    """
+    driven = set()
+    for link in LITE_PAIRS:
+        body = body_id(lite, link)
+        while body > 0:
+            for joint in range(lite.body_jntadr[body], lite.body_jntadr[body] + lite.body_jntnum[body]):
+                driven.add(mujoco.mj_id2name(lite, mujoco.mjtObj.mjOBJ_JOINT, joint))
+            body = lite.body_parentid[body]
+    return tuple(sorted(driven))
+
+
 def goals(pos: np.ndarray, quat: np.ndarray, calibration: Calibration) -> tuple[np.ndarray, np.ndarray]:
     """World goal pose of each link of :data:`LITE_PAIRS`, per frame.
 

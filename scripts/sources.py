@@ -41,6 +41,8 @@ class Source(NamedTuple):
     title: str
     #: The terms its clips, and so its motions, come under.
     license: str
+    #: The skeleton its clips move, and so what of Lite they can drive.
+    skeleton: str
     #: The directory of the clips, under the cache of the source. A motion is named
     #: after the path of its clip below this directory.
     clip_dir: str
@@ -147,6 +149,7 @@ SOURCES: dict[str, Source] = {
     "lafan1bvh": Source(
         title="LAFAN1 BVH",
         license="CC BY-NC-ND 4.0",
+        skeleton="Human, 22 joints, no fingers",
         zip_url="https://media.githubusercontent.com/media/ubisoft/ubisoft-laforge-animation-dataset/master/lafan1/lafan1.zip",
         page="https://github.com/ubisoft/ubisoft-laforge-animation-dataset",
         clip_dir="bvh",
@@ -156,6 +159,7 @@ SOURCES: dict[str, Source] = {
     "lafan1": Source(
         title="LAFAN1",
         license="CC BY-NC-ND 4.0",
+        skeleton="Unitree G1, 29 joints",
         repo_id="lvhaidong/LAFAN1_Retargeting_Dataset",
         allow_patterns=("g1/*.csv", "meta_data/**", "README.md", "LICENSE"),
         clip_dir="g1",
@@ -165,6 +169,7 @@ SOURCES: dict[str, Source] = {
     "amass": Source(
         title="AMASS",
         license="AMASS: non-commercial research, no redistribution",
+        skeleton="Unitree G1, 29 joints",
         repo_id="fleaven/Retargeted_AMASS_for_robotics",
         allow_patterns=("g1/**", "README.md"),
         clip_dir="g1",
@@ -174,6 +179,7 @@ SOURCES: dict[str, Source] = {
     "motiondecode": Source(
         title="MotionDecode",
         license="ChingMu: non-commercial research, not to be hosted as a competing dataset",
+        skeleton="Unitree G1, 29 joints",
         repo_id="CMRobot/MotionDecode",
         allow_patterns=("samples/**", "metadata/**", "README.md", "LICENSE.md"),
         clip_dir="samples",
@@ -183,6 +189,7 @@ SOURCES: dict[str, Source] = {
     "kimodo": Source(
         title="Kimodo G1",
         license="Apache-2.0",
+        skeleton="Unitree G1, 29 joints",
         repo_id="cagataydev/kimodo-g1-motion-v1",
         allow_patterns=("data/**", "meta/**", "README.md"),
         clip_dir="episodes",
@@ -193,6 +200,7 @@ SOURCES: dict[str, Source] = {
     "kimodolh2": Source(
         title="Kimodo G1 long-horizon v2",
         license="Apache-2.0",
+        skeleton="Unitree G1, 29 joints",
         repo_id="cagataydev/kimodo-g1-longhorizon-v2",
         allow_patterns=("data/**", "meta/**", "README.md"),
         clip_dir="episodes",
@@ -203,6 +211,7 @@ SOURCES: dict[str, Source] = {
     "kimodolh3": Source(
         title="Kimodo G1 long-horizon v3",
         license="Apache-2.0",
+        skeleton="Unitree G1, 29 joints",
         repo_id="cagataydev/kimodo-g1-longhorizon-v3",
         allow_patterns=("data/**", "meta/**", "README.md"),
         clip_dir="episodes",

@@ -128,6 +128,7 @@ def write_robot_layer(
     body_quat: np.ndarray,
     geometry: bool,
     metrics: dict[str, float],
+    active_joints: tuple[str, ...],
 ) -> Path:
     """Write ``<robot>/<name>.rrd``: everything one robot needs for one motion.
 
@@ -149,6 +150,9 @@ def write_robot_layer(
 
     ``metrics`` are the quality numbers of ``retarget.motion_metrics``, kept as the
     ``metrics`` property so a motion carries how well it was made.
+
+    ``active_joints`` are the joints the source drives, kept as ``active_joint_names``. Every
+    other joint holds its default, 0, so a motion says what of the robot it can train.
     """
     robot = _robot_name(urdf_path)
     tree = rr.urdf.UrdfTree.from_file_path(
@@ -170,6 +174,7 @@ def write_robot_layer(
             joint_names=list(joint_names),
             body_names=list(body_names),
             source_body_names=list(source_body_names),
+            active_joint_names=list(active_joints),
         ))
         stream.send_property("metrics", rr.AnyValues(**metrics))
         if geometry:

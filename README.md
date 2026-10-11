@@ -204,6 +204,15 @@ the Lite soles on the floor in the median frame. Each source puts the G1 at its 
 height, and AMASS puts the pelvis at the floor, so the shift is measured on the Lite
 result. The median ignores the few frames where a heel or a toe dips through the floor.
 
+**Driven joints.** A source drives only the Lite joints it has data for. A G1 source
+drives the 29 joints of `common.G1_TO_LITE`, and has no neck, ankle yaw or fingers. A human
+source drives every joint between the pelvis and a link with a goal: 34 joints for
+LAFAN1, which has no fingers. Every other joint holds its default, 0. The robot layer
+keeps the driven joints as `active_joint_names`, so a motion with fewer of them can still
+train the robot it covers, such as a G1 motion for the legs of the Lite Biped. The motion
+browser shows them, with how many joints of each Lite variant a motion drives, and
+filters the motions by the joint groups they drive.
+
 **Metrics.** `retarget.motion_metrics` measures every motion. The robot layer keeps the
 numbers as its `metrics` property, and a run prints their mean:
 

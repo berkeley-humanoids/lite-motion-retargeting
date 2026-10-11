@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     CACHE_ROOT,
     FPS,
+    G1_DRIVEN,
     G1_JOINT_NAMES,
     G1_TO_LITE,
     IK_BODY_PAIRS,
@@ -77,6 +78,7 @@ from mapping import (  # noqa: E402
     FEET,
     LITE_PAIRS,
     calibrate,
+    driven_joints,
     goals,
     load_floating_model,
     plant,
@@ -415,6 +417,7 @@ class Clip(NamedTuple):
     The ``source_*`` arrays are the clip as published, at ``source_fps``: the joints of the
     source, if it has joint angles to keep, and the world pose of its bodies. The rest are
     the retarget, at :data:`FPS`. ``goal_sources`` names the source body each goal follows.
+    ``active_joints`` are the joints the source drives. Every other joint holds 0.
     """
 
     source_fps: int
@@ -429,6 +432,7 @@ class Clip(NamedTuple):
     goal_pos: np.ndarray
     goal_quat: np.ndarray
     metrics: dict[str, float]
+    active_joints: tuple[str, ...]
 
 
 def retarget_clip(
@@ -464,6 +468,7 @@ def retarget_clip(
             motion, joint_pos, models.g1, models.lite, models.joint_addrs,
             iters=ik_iters, show_progress=show_progress,
         )
+    joint_pos[:, [name not in G1_DRIVEN for name in models.joint_names]] = 0.0
 
     base_pos, base_quat = step1["base_pos"], step1["base_quat"]
     base_pos[:, 2] += ground_height(models.lite, models.joint_addrs, joint_pos, base_pos, base_quat)
@@ -481,6 +486,7 @@ def retarget_clip(
         source_fps, G1_JOINT_NAMES, clip["g1_joint_pos"], SOURCE_BODIES, source_pos, source_quat,
         joint_pos, ROBOT_BODIES, SOURCE_BODIES, goal_pos, goal_quat,
         motion_metrics(models, base_pos, base_quat, joint_pos, ROBOT_BODIES, goal_pos, goal_quat, feet_planted),
+        G1_DRIVEN,
     )
 
 
@@ -494,6 +500,8 @@ def _retarget_human(models: Models, clip: HumanClip, ik_iters: int) -> Clip:
     base_pos, base_quat, joint_pos = solve_ik(
         models.floating, models.joint_names, goal_pos, goal_quat, ik_iters
     )
+    active = driven_joints(models.lite)
+    joint_pos[:, [name not in active for name in models.joint_names]] = 0.0
 
     # The planted goals stand on the floor, and the IK leaves the soles within a few
     # millimetres of them, so grounding barely moves the robot, and moves the goals with it.
@@ -508,6 +516,7 @@ def _retarget_human(models: Models, clip: HumanClip, ik_iters: int) -> Clip:
         clip.source_bodies, clip.source_pos, clip.source_quat,
         joint_pos, links, tuple(pair.human for pair in LITE_PAIRS.values()), goal_pos, goal_quat,
         motion_metrics(models, base_pos, base_quat, joint_pos, links, goal_pos, goal_quat, feet_planted),
+        active,
     )
 
 
@@ -530,7 +539,7 @@ def write_motion(models: Models, name: str, clip: Clip, urdf: Path, geometry: bo
         write_robot_layer(
             out, name, urdf, FPS, models.joint_names, clip.joint_pos,
             clip.goal_links, clip.goal_sources, clip.goal_pos, clip.goal_quat, geometry,
-            clip.metrics,
+            clip.metrics, clip.active_joints,
         ),
     ]
 

@@ -148,6 +148,10 @@ G1_TO_LITE: dict[str, tuple[str, int, float]] = {
     "right_wrist_yaw_joint":     ("right_wrist_pitch",   +1, 0.0),
 }
 
+#: The Lite joints a G1 source drives. The neck, the ankle yaw and the fingers have no G1
+#: joint, and hold their default.
+G1_DRIVEN: tuple[str, ...] = tuple(lite for lite, _, _ in G1_TO_LITE.values())
+
 
 # ── Model loaders ─────────────────────────────────────────────────────────────
 

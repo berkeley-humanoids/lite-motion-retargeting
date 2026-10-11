@@ -4,23 +4,25 @@ A layer is a stage of the pipeline, a directory, and one file per motion:
 
     base/        <motion>.rrd   the source clip as published, at its own rate
     <robot>/     <motion>.rrd   everything the robot needs, at the control rate
+    assets/      <robot>.rrd    the geometry of that robot, once for every motion
     blueprints/  <robot>.rbl    the viewer layout for that robot
 
 ``base/`` is provenance. Nothing downstream reads it, and a motion is complete without
-it. ``<robot>/`` is self-contained: its joints reset the robot, its body poses are the
-goal the robot tracks, and its geometry draws it.
+it. ``<robot>/`` is what training reads: its joints reset the robot, and its body poses
+are the goal the robot tracks.
 
 A robot layer stores the **goal**, not the pose the solve reached, and says so in the
 path: ``/<robot>/goal/`` and not ``/<robot>/body/``. The reached pose is the forward
 kinematics of the joints in the same file, so storing it would repeat what is already
-there, and the goal is recoverable from nothing else. The joint chain under
+there. Nothing else in the file gives the goal. The joint chain under
 ``/<robot>/tf`` already draws the robot where the solve put it, so the gap between the
 robot and its goal triads is the error of the solve, in one file.
 
-Every layer of one motion shares an ``application_id`` and a ``recording_id``, and the
-viewer pools data by those two ids, so ``rerun <root>/*/<motion>.rrd`` opens them as one
+Every layer of one motion shares an ``application_id`` and a ``recording_id``. The viewer
+pools data by those two ids, so ``rerun <root>/*/<motion>.rrd`` opens the layers as one
 recording. Each file also embeds the layout, so any one of them opens sensibly alone.
-Blueprints do not merge and the last one loaded wins, so pass the ``.rbl`` last.
+Blueprints do not merge, and the last one that the viewer loads wins, so put the ``.rbl``
+last on the command line.
 
 Both layers store bodies and joints the same way, so one writer serves both:
 
@@ -35,9 +37,9 @@ Both layers store bodies and joints the same way, so one writer serves both:
     /<robot>/tf_static                the URDF's fixed transforms
     /<robot>/visual_geometries/...    the URDF's geometry, named by ``rr.urdf``
 
-A pose names a transform frame instead of riding the entity hierarchy, which is what
-Rerun recommends for robot data and what ``rr.urdf`` writes. The layer prefixes the frame
-name, so a source body and a robot link of the same name stay apart, and so do
+A pose names a transform frame and does not use the entity hierarchy. Rerun recommends
+this for robot data, and ``rr.urdf`` writes it. The layer prefixes the frame name, so a
+source body and a robot link of the same name stay apart, and so do
 ``<robot>/goal/<link>`` and the ``<robot>/<link>`` that the joint chain already defines.
 A frame has one parent.
 
@@ -45,8 +47,14 @@ Every entity drawn in 3D must name a frame. One that names none is an orphan: th
 invents a frame for it, finds no route to the root of the view, and draws an error in its
 place. Scalars are exempt, because the viewer plots them against time.
 
-Each motion carries its own copy of the robot's geometry. A shared file would need a
-different recording id, which the viewer would not compose against the motion.
+The geometry of a robot is 9 MB, more than most motions, so ``assets/<robot>.rrd`` holds
+it once, as static data under a recording id of its own. ``rerun --asset`` (Rerun 0.38.1
+and later) attaches it to every motion the viewer opens:
+
+    rerun <root>/*/<motion>.rrd --asset <root>/assets/<robot>.rrd <root>/blueprints/<robot>.rbl
+
+Only the native viewer loads assets. A motion that the web viewer must draw on its own,
+such as one the Hub card links to, carries its own copy of the geometry instead.
 
 Rerun stores a rotation as xyzw. MuJoCo, and every array this module takes, uses wxyz.
 """
@@ -58,19 +66,21 @@ import rerun as rr
 import rerun.blueprint as rrb
 from common import quat_mul
 
-#: Shared by every motion, so a directory of them registers as one dataset.
+#: Every motion uses this id, so a directory of motions registers as one dataset.
 APPLICATION_ID: str = "lite-motion-tracking"
 
-#: Every temporal column carries both. A loader indexes by ``frame``. ``time`` is what
-#: plays the motion at true speed, and what lines up two layers written at different
-#: rates, whose frame counts do not match.
+#: Every temporal column has both timelines. A loader indexes by ``frame``. ``time`` plays
+#: the motion at true speed, and lines up two layers at different rates, whose frame
+#: counts do not match.
 TIMELINE_FRAME: str = "frame"
 TIMELINE_TIME: str = "time"
 
+#: The layer that holds the source clip as published.
 BASE_LAYER: str = "base"
 WORLD_FRAME: str = "world"
 
-#: Metres. Long enough to clear the limbs of the robot, which would otherwise hide it.
+#: The length of each axis of a triad, in metres. It is long enough to clear the limbs of
+#: the robot, which would otherwise hide it.
 AXIS_LENGTH: float = 0.12
 
 
@@ -86,10 +96,11 @@ def write_base_layer(
 ) -> Path:
     """Write ``base/<name>.rrd``: the source clip as published, at its own rate.
 
-    This layer keeps the source inside the store, so a motion can be derived again
-    without the upstream dataset. It holds the joints of the source robot and the world
-    poses they put its bodies at, in that robot's own frame convention, so nothing here
-    is directly comparable to a robot layer.
+    This layer keeps the source inside the store, so you can derive a motion again without
+    the upstream dataset. It holds the joints of a source robot, and the world poses of the
+    bodies of the source, robot or human, in the frame convention of the source. Thus
+    nothing here is directly comparable to a robot layer. A human source has no joint
+    angles to keep, and ``joint_names`` is empty.
 
     ``body_pos`` is ``(T, NB, 3)`` and ``body_quat`` ``(T, NB, 4)`` wxyz, both world.
     """
@@ -101,7 +112,8 @@ def write_base_layer(
         stream.send_property("motion", rr.AnyValues(
             fps=fps, joint_names=list(joint_names), body_names=list(body_names)
         ))
-        _send_joints(stream, BASE_LAYER, fps, joint_names, joint_pos)
+        if joint_names:
+            _send_joints(stream, BASE_LAYER, fps, joint_names, joint_pos)
         _send_bodies(stream, f"{BASE_LAYER}/body", fps, body_names, body_pos, body_quat)
     return path
 
@@ -117,32 +129,38 @@ def write_robot_layer(
     source_body_names: tuple[str, ...],
     body_pos: np.ndarray,
     body_quat: np.ndarray,
+    geometry: bool,
+    metrics: dict[str, float],
+    active_joints: tuple[str, ...],
 ) -> Path:
     """Write ``<robot>/<name>.rrd``: everything one robot needs for one motion.
 
-    The layer holds the joints the solve reached, the world pose ``body_names`` is meant
-    to reach, and the robot's geometry, so the file animates the robot on its own.
-    Everything sits under ``/<robot>/``, the URDF's frames and static transforms
-    included, so a second robot can open beside it.
+    The layer holds the joints that the solve reached, and the world pose that each of
+    ``body_names`` is meant to reach. With ``geometry``, it also holds the geometry of the
+    robot and the static transforms of the URDF, so the file animates the robot on its own.
+    Without ``geometry``, the viewer takes them from the asset that :func:`write_asset`
+    writes. Everything is under ``/<robot>/``, so a second robot can open beside it.
 
-    ``body_pos`` and ``body_quat`` are the **goal**, in this robot's frame convention,
-    which is what a tracking reward compares against, and they go under ``/<robot>/goal/``
-    so no reader mistakes them for where the robot is. ``source_body_names`` names the
-    body of the source rig each goal came from, in the order of ``body_names``, because
-    two rigs need not share a vocabulary.
+    ``body_pos`` and ``body_quat`` are the **goal**, in the frame convention of this robot,
+    which is what a tracking reward compares against. They go under ``/<robot>/goal/`` so
+    that no reader mistakes them for where the robot is. ``source_body_names`` names the
+    body of the source rig that each goal came from, in the order of ``body_names``,
+    because two rigs need not share a vocabulary.
 
     ``body_names`` must contain the root link of the URDF, whose goal places the robot.
-    The solve does not move the root: its goal is the base trajectory the retarget was
-    given, so the goal and the reached pose are the same pose for that one body.
+    Its goal is the base trajectory of the retarget, so the goal and the reached pose are
+    the same pose for that one body.
+
+    ``metrics`` are the quality numbers of ``retarget.motion_metrics``. The layer keeps
+    them as the ``metrics`` property, so a motion records how well the retarget went.
+
+    ``active_joints`` are the joints that the source drives, kept as
+    ``active_joint_names``. Every other joint holds its default, 0, so a motion says which
+    part of the robot it can train.
     """
     robot = _robot_name(urdf_path)
-    tree = rr.urdf.UrdfTree.from_file_path(
-        urdf_path,
-        frame_prefix=f"{robot}/",
-        static_transform_entity_path=f"{robot}/tf_static",
-    )
-    frames = joint_pos.shape[0]
-    indexes = _indexes(frames, fps)
+    tree = _urdf_tree(urdf_path, robot)
+    indexes = _indexes(joint_pos.shape[0], fps)
 
     path = root / robot / f"{name}.rrd"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,13 +173,16 @@ def write_robot_layer(
             joint_names=list(joint_names),
             body_names=list(body_names),
             source_body_names=list(source_body_names),
+            active_joint_names=list(active_joints),
         ))
-        tree.log_urdf_to_recording(recording=stream)
+        stream.send_property("metrics", rr.AnyValues(**metrics))
+        if geometry:
+            tree.log_urdf_to_recording(recording=stream)
         _send_joints(stream, robot, fps, joint_names, joint_pos)
         _send_bodies(stream, f"{robot}/goal", fps, body_names, body_pos, body_quat)
 
-        # The frame graph that puts the geometry where the joints say it is. Each joint
-        # is its own chunk, so a row still carries one parent-child relation.
+        # The frame graph puts the geometry where the joints say it is. Each joint is a chunk
+        # of its own, so a row carries one parent-child relation.
         for joint in tree.joints():
             if joint.name not in joint_names:
                 continue
@@ -177,13 +198,26 @@ def write_robot_layer(
         stream.send_columns(
             f"/{robot}/tf",
             indexes=indexes,
-            columns=rr.Transform3D.columns(
-                translation=body_pos[:, placement],
-                quaternion=_wxyz_to_xyzw(body_quat[:, placement]),
-                child_frame=[f"{robot}/{root_link}"] * frames,
-                parent_frame=[WORLD_FRAME] * frames,
+            columns=_pose_columns(
+                body_pos[:, placement], body_quat[:, placement], f"{robot}/{root_link}"
             ),
         )
+    return path
+
+
+def write_asset(root: Path, urdf_path: Path) -> Path:
+    """Write ``assets/<robot>.rrd``: the URDF's geometry and static transforms.
+
+    An asset can hold only static data. Its recording id is its own, because the viewer
+    attaches an asset to every motion of the dataset, whatever their ids.
+    """
+    robot = _robot_name(urdf_path)
+    tree = _urdf_tree(urdf_path, robot)
+    path = root / "assets" / f"{robot}.rrd"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rr.RecordingStream(APPLICATION_ID, recording_id=f"{robot}_geometry") as stream:
+        stream.save(str(path))
+        tree.log_urdf_to_recording(recording=stream)
     return path
 
 
@@ -197,8 +231,21 @@ def write_blueprint(root: Path, urdf_path: Path) -> Path:
 
 
 def _robot_name(urdf_path: Path) -> str:
-    """The name the URDF gives the robot, which names its layer and its blueprint."""
+    """Return the robot name in the URDF, which names its layer, asset, and blueprint."""
     return rr.urdf.UrdfTree.from_file_path(urdf_path).name
+
+
+def _urdf_tree(urdf_path: Path, robot: str) -> rr.urdf.UrdfTree:
+    """Load the URDF with its frames and static transforms under ``<robot>/``.
+
+    The robot layer and the asset both load it this way, so the geometry of the asset names
+    the frames that the joints of the layer move.
+    """
+    return rr.urdf.UrdfTree.from_file_path(
+        urdf_path,
+        frame_prefix=f"{robot}/",
+        static_transform_entity_path=f"{robot}/tf_static",
+    )
 
 
 def _send_joints(
@@ -208,7 +255,7 @@ def _send_joints(
     joint_names: tuple[str, ...],
     joint_pos: np.ndarray,
 ) -> None:
-    """Write one layer's joint positions, and the velocities differenced from them."""
+    """Write the joint positions of ``layer``, and the velocities differenced from them."""
     frames = joint_pos.shape[0]
     indexes = _indexes(frames, fps)
     joint_vel = np.zeros_like(joint_pos)
@@ -223,7 +270,7 @@ def _send_joints(
 
 
 def _indexes(frames: int, fps: int) -> list[rr.TimeColumn]:
-    """The two time axes of a temporal column, over ``frames`` samples at ``fps``."""
+    """Return the two timelines of a temporal column, for ``frames`` samples at ``fps``."""
     steps = np.arange(frames)
     return [
         rr.TimeColumn(TIMELINE_FRAME, sequence=steps),
@@ -231,12 +278,22 @@ def _indexes(frames: int, fps: int) -> list[rr.TimeColumn]:
     ]
 
 
-def _wxyz_to_xyzw(quat: np.ndarray) -> np.ndarray:
-    return np.ascontiguousarray(quat[..., [1, 2, 3, 0]], dtype=np.float32)
+def _pose_columns(pos: np.ndarray, quat: np.ndarray, child_frame: str) -> rr.ComponentColumnList:
+    """Return the columns that place ``child_frame`` in the world, a row per frame.
+
+    ``pos`` is ``(T, 3)`` and ``quat`` ``(T, 4)`` wxyz.
+    """
+    frames = len(pos)
+    return rr.Transform3D.columns(
+        translation=pos,
+        quaternion=np.ascontiguousarray(quat[..., [1, 2, 3, 0]], dtype=np.float32),
+        child_frame=[child_frame] * frames,
+        parent_frame=[WORLD_FRAME] * frames,
+    )
 
 
 def _axis_triad() -> rr.Arrows3D:
-    """A red/green/blue triad along +X/+Y/+Z, as geometry that can name a frame."""
+    """Return a red, green, and blue triad along +X, +Y, and +Z, as geometry that names a frame."""
     return rr.Arrows3D(
         vectors=np.eye(3) * AXIS_LENGTH,
         colors=[[255, 70, 70], [70, 220, 70], [90, 140, 255]],
@@ -246,12 +303,12 @@ def _axis_triad() -> rr.Arrows3D:
 def _velocities(
     pos: np.ndarray, quat: np.ndarray, fps: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Linear and angular velocity of a ``(T, NB, ...)`` pose trajectory, world frame.
+    """Return the linear and angular world velocity of a ``(T, NB, ...)`` pose trajectory.
 
-    Backward difference, so frame 0 has no earlier sample and keeps its zero. The angular
-    part has to come from the rotation between two frames, because an Euler rate is not
-    an angular velocity, and that rotation has to go the short way round: a quaternion
-    can flip sign between frames, and the flipped one reads as a near-full turn.
+    Both are backward differences, so frame 0, which has no earlier sample, keeps zero. The
+    angular velocity comes from the rotation between two frames, because an Euler rate is
+    not an angular velocity. That rotation must take the short way: a quaternion can flip
+    sign between frames, and the flipped quaternion reads as an almost full turn.
     """
     linear = np.zeros_like(pos)
     linear[1:] = np.diff(pos, axis=0) * fps
@@ -261,7 +318,7 @@ def _velocities(
     axis = step[..., 1:]
     sin_half = np.linalg.norm(axis, axis=-1)
     angle = 2.0 * np.arctan2(sin_half, step[..., 0])
-    # angle / sin_half tends to 2 as the step vanishes, which is the value to use there
+    # As the step goes to zero, angle / sin_half goes to 2, which is the value to use there.
     scale = np.divide(
         angle, sin_half, out=np.full_like(angle, 2.0), where=sin_half > 1e-12
     )
@@ -280,8 +337,8 @@ def _send_bodies(
 ) -> None:
     """Write a group of body poses, triads, and velocities under ``/<group>/``.
 
-    ``group`` is ``<layer>/body`` where the poses are where the bodies are, and
-    ``<layer>/goal`` where they are where the bodies are meant to be.
+    ``group`` is ``<layer>/body`` when the poses are where the bodies are, and
+    ``<layer>/goal`` when the poses are where the bodies are meant to be.
     """
     frames = body_pos.shape[0]
     indexes = _indexes(frames, fps)
@@ -290,12 +347,7 @@ def _send_bodies(
         stream.send_columns(
             f"/{group}/poses/{body}",
             indexes=indexes,
-            columns=rr.Transform3D.columns(
-                translation=body_pos[:, i],
-                quaternion=_wxyz_to_xyzw(body_quat[:, i]),
-                child_frame=[frame] * frames,
-                parent_frame=[WORLD_FRAME] * frames,
-            ),
+            columns=_pose_columns(body_pos[:, i], body_quat[:, i], frame),
         )
         stream.log(
             f"/{group}/frames/{body}",
@@ -307,8 +359,8 @@ def _send_bodies(
     linear, angular = _velocities(body_pos, body_quat, fps)
     rows = [len(body_names)] * frames
     for entity, vectors in (("linear", linear), ("angular", angular)):
-        # The velocities are siblings of the poses, not children: an Arrows3D below a
-        # posed entity would inherit that pose and turn its vectors.
+        # The velocities are siblings of the poses, not children. An Arrows3D below a posed
+        # entity would inherit that pose and turn its vectors.
         stream.log(
             f"/{group}/{entity}_velocities",
             rr.CoordinateFrame(frame=WORLD_FRAME),
@@ -324,10 +376,11 @@ def _send_bodies(
 
 
 def _hidden_velocities(group: str) -> dict[str, rrb.EntityBehavior]:
-    """Start one group's velocity arrows switched off.
+    """Return the overrides that hide the velocity arrows of ``group`` at the start.
 
-    At walking speed the arrows are metres long and bury the robot. Hiding keeps them in
-    the entity tree, one click away; excluding them would take a view filter edit.
+    At walking speed, the arrows are metres long and bury the robot. A hidden entity stays
+    in the entity tree, one click away. An excluded entity would need an edit of the view
+    filter.
     """
     return {
         f"/{group}/{quantity}_velocities": rrb.EntityBehavior(visible=False)
@@ -345,12 +398,12 @@ def _base_blueprint() -> rrb.Blueprint:
 
 
 def _robot_blueprint(robot: str) -> rrb.Blueprint:
-    """The robot in 3D beside its joint plots, with its goal triads over it.
+    """Return the layout: the robot in 3D beside its joint plots, with its goal triads over it.
 
-    Seeing both is the point: the gap between a goal triad and the link under it is the
-    error of the solve, frame by frame. The source layer, if it is open too, draws its
-    own triads in its own frame convention, so it is off by a fixed angle by
-    construction, and its velocities start switched off with everything else.
+    The view shows both, because the gap between a goal triad and the link under it is the
+    error of the solve, frame by frame. If the source layer is open too, it draws its own
+    triads in its own frame convention, so they are off by a fixed angle. Its velocities
+    also start hidden.
     """
     hidden = (
         _hidden_velocities(f"{BASE_LAYER}/body") | _hidden_velocities(f"{robot}/goal")

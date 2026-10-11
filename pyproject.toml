@@ -1,7 +1,7 @@
 [project]
 name = "lite-motion-retargeting"
 version = "0.1.0"
-description = "LAFAN1 motions retargeted from the Unitree G1 to the Berkeley Lite humanoid."
+description = "Motion capture sets retargeted from the Unitree G1 to the Berkeley Lite humanoid."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,10 +9,16 @@ dependencies = [
     "mink>=0.0.7",
     "mujoco>=3.2",
     "numpy>=1.26",
-    "rerun-sdk>=0.36",
-    "robot-assets @ git+https://github.com/Berkeley-Humanoids/Lite-Description.git",
+    # Kimodo ships LeRobot parquet shards, and the site reads Rerun chunks as Arrow.
+    "pyarrow>=18",
+    "rerun-sdk>=0.38.1",
+    "lite-description @ git+https://github.com/Berkeley-Humanoids/Lite-Description.git",
     # Slerp, for the resample of the base rotation onto the output rate.
     "scipy>=1.11",
     "tqdm>=4.66",
     "tyro>=0.9",
 ]
+
+[project.optional-dependencies]
+# ReActor trains in MuJoCo Warp. mjlab pins MuJoCo, which the IK then runs on too.
+reactor = ["mjlab>=1.6"]

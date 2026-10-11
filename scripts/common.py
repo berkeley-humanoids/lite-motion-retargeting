@@ -1,41 +1,63 @@
-"""Shared helpers for the LAFAN1 → Lite retargeting pipeline.
+"""Shared helpers for the retargeting pipeline.
 
 Conventions:
-- Quaternions are scalar-first WXYZ, unit-norm, ``w >= 0``. The only non-WXYZ
-  appearance is the LAFAN1 CSV row, converted exactly once in
-  :func:`load_lafan_csv`.
-- The Lite ``joint_pos`` column order is whatever MuJoCo emits from the MJCF
-  (:func:`lite_joint_names`); we never hardcode it.
+- Quaternions are scalar-first wxyz, unit-norm, with ``w >= 0``. A source file can store
+  xyzw, and its loader in ``sources.py`` converts it exactly once.
+- MuJoCo sets the column order of the Lite ``joint_pos`` from the MJCF
+  (:func:`lite_joint_names`). No code hardcodes it.
 """
 
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import mujoco
 import numpy as np
+from lite_description import get_mjcf_path, get_urdf_path
 from scipy.spatial.transform import Rotation, Slerp
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-#: The rate of the LAFAN1 CSVs.
-SOURCE_FPS: int = 30
-
-#: The rate a motion is written at, which is the control rate of the training
+#: The rate of every written motion, which is the control rate of the training
 #: environment. A motion at another rate would force the loader to interpolate.
 FPS: int = 50
 
-LAFAN_REPO_ID: str = "lvhaidong/LAFAN1_Retargeting_Dataset"
+#: The Hub dataset repo that holds the published motions.
 DATASET_REPO_ID: str = "Berkeley-Humanoids/Lite-LAFAN1-Dataset"
 
-#: The body both robots are rooted at. Neither model gives it a joint, so it is the
-#: frame forward kinematics runs in rather than a body of the result, and the base
-#: trajectory of the motion is its world pose.
+#: The one source that the Hub repo holds. The terms of the other sources forbid it: AMASS
+#: bars any redistribution, and ChingMu bars hosting MotionDecode as a competing dataset.
+#: Their motions stay in the local store, for training.
+PUBLIC_SOURCE: str = "lafan1"
+
+#: The static Space that hosts the motion browser. The browser reads the motions from the
+#: dataset repo.
+SPACE_REPO_ID: str = "Berkeley-Humanoids/Lite-Motion-Dataset"
+
+#: The local copy of each source and of the G1 model, one directory each.
+CACHE_ROOT: Path = Path(__file__).resolve().parent.parent / ".cache"
+
+#: A point of a source foot can plant the foot only below this speed, in m/s. See
+#: :func:`planted`.
+CONTACT_SPEED: float = 0.2
+#: A point of a source foot can plant the foot only below this height above the floor, in
+#: metres.
+CONTACT_HEIGHT: float = 0.05
+
+#: The upstream authors retargeted every G1 source to this G1 model. The LAFAN1 repo
+#: bundles it.
+G1_REPO_ID: str = "lvhaidong/LAFAN1_Retargeting_Dataset"
+G1_URDF_PATH: Path = CACHE_ROOT / "g1" / "robot_description" / "g1" / "g1_29dof_rev_1_0.urdf"
+
+#: The body that both robots are rooted at. Neither model gives it a joint, so it is the
+#: frame that forward kinematics runs in, not a body of the result. The base trajectory of
+#: a motion is its world pose.
 BASE_BODY: str = "pelvis"
 
 #: Lite link -> the G1 link whose pose the IK aims it at. The Lite names come from the
-#: MJCF. The G1 names come from its URDF after MuJoCo import, where the fixed-jointed
-#: ``*_rubber_hand`` link fuses into ``*_wrist_yaw_link``, the last named body of each
-#: arm chain.
+#: MJCF. The G1 names come from its URDF after the MuJoCo import, which fuses the
+#: fixed-joint ``*_rubber_hand`` link into ``*_wrist_yaw_link``, the last named body of
+#: each arm chain.
 IK_BODY_PAIRS: dict[str, str] = {
     "left_foot": "left_ankle_roll_link",
     "right_foot": "right_ankle_roll_link",
@@ -43,17 +65,14 @@ IK_BODY_PAIRS: dict[str, str] = {
     "right_hand": "right_wrist_yaw_link",
 }
 
-#: The bodies each layer of a motion stores, the root body first. The robot layer names
-#: them after the links of Lite, the base layer after the links of the G1.
+#: The bodies that each layer of a motion from a G1 source stores, the root body first.
+#: The robot layer names them after the Lite links, and the base layer after the G1 links.
 ROBOT_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS)
 SOURCE_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS.values())
 
-LAFAN_G1_URDF_RELPATH: str = "robot_description/g1/g1_29dof_rev_1_0.urdf"
-
-# Authoritative LAFAN1 G1 CSV joint order. Every CSV row is
-# ``[base_x, base_y, base_z, base_qx, base_qy, base_qz, base_qw,
-#   *G1_LAFAN_JOINT_NAMES]`` at :data:`SOURCE_FPS`.
-G1_LAFAN_JOINT_NAMES: tuple[str, ...] = (
+#: The joints of the 29-DoF G1, in the order that every G1 source stores them after the
+#: base position and rotation.
+G1_JOINT_NAMES: tuple[str, ...] = (
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
     "left_hip_yaw_joint",
@@ -85,20 +104,19 @@ G1_LAFAN_JOINT_NAMES: tuple[str, ...] = (
     "right_wrist_yaw_joint",
 )
 
-# G1 joint → (Lite joint, sign, offset_rad). Step-1 retargeting applies
-# ``lite_q[t] = sign * g1_q[t] + offset`` per joint.
-#
-# Decisions baked into this table:
-#   - Legs: chain order and axes match; sign=+1, offset=0.
-#   - Waist: chain order DIFFERS (G1 yaw→roll→pitch vs Lite yaw→pitch→roll),
-#     but axes match by *name*, so we map by name and accept the small
-#     rotation-order approximation when multiple waist joints are non-zero.
-#   - Shoulders + elbows: chain order matches; offsets bring G1's arms-down
-#     rest pose to Lite's T-pose rest (±π/2 on shoulder_roll and elbow).
-#   - Wrists: chain order DIFFERS (G1 roll→pitch→yaw vs Lite yaw→roll→pitch)
-#     but the physical 3-DoF wrist is the same, so we map by *position in
-#     the chain* (G1 wrist_roll → Lite wrist_yaw, etc.). Sign of the first
-#     wrist DoF is -1 because the URDFs picked opposite positive directions.
+#: G1 joint -> (Lite joint, sign, offset in rad). Step 1 of the G1 retarget sets
+#: ``lite_q = sign * g1_q + offset`` for each joint:
+#:
+#: - Legs: the chain order and the axes match, so the sign is +1 and the offset is 0.
+#: - Waist: the chain order differs (G1 yaw, roll, pitch, and Lite yaw, pitch, roll), but
+#:   the axes match by name. The table maps by name, which is a small approximation when
+#:   more than one waist joint is not zero.
+#: - Shoulders and elbows: the chain order matches. The offsets (±π/2 on shoulder roll and
+#:   elbow) move the G1 rest pose, arms down, to the Lite rest pose, a T-pose.
+#: - Wrists: the chain order differs (G1 roll, pitch, yaw, and Lite yaw, roll, pitch), but
+#:   the physical 3-DoF wrist is the same, so the table maps by position in the chain: G1
+#:   wrist roll to Lite wrist yaw, and so on. The first wrist DoF has sign -1, because the
+#:   two URDFs use opposite positive directions.
 G1_TO_LITE: dict[str, tuple[str, int, float]] = {
     # Legs (12)
     "left_hip_pitch_joint":      ("left_hip_pitch",      +1, 0.0),
@@ -135,41 +153,40 @@ G1_TO_LITE: dict[str, tuple[str, int, float]] = {
     "right_wrist_yaw_joint":     ("right_wrist_pitch",   +1, 0.0),
 }
 
+#: The Lite joints that a G1 source drives. The neck, the ankle yaw, and the fingers have no
+#: G1 joint, and hold their default.
+G1_DRIVEN: tuple[str, ...] = tuple(lite for lite, _, _ in G1_TO_LITE.values())
+
 
 # ── Model loaders ─────────────────────────────────────────────────────────────
 
 
 def load_lite_model() -> mujoco.MjModel:
     """Load the Lite Pro MJCF, the same asset that the training repo loads."""
-    from robot_assets import load
-
-    return mujoco.MjModel.from_xml_path(str(load("robots/lite_pro/mjcf/lite_pro.xml")))
+    return mujoco.MjModel.from_xml_path(str(get_mjcf_path("lite_pro")))
 
 
 def lite_urdf_path() -> Path:
-    """Path to the Lite Pro URDF, whose geometry goes into the robot layer.
+    """Return the path of the Lite Pro URDF, whose geometry goes into the robot layer.
 
     The MJCF drives the retarget and this URDF only draws it, so the two must describe
     one robot. They come from one asset package, and their joint and link names match.
     """
-    from robot_assets import load
-
-    return Path(load("robots/lite_pro/urdf/lite_pro.urdf"))
+    return get_urdf_path("lite_pro")
 
 
-def load_g1_model(lafan_root: Path) -> mujoco.MjModel:
-    """Load the Unitree G1 URDF bundled in the downloaded LAFAN1 dataset.
+def load_g1_model() -> mujoco.MjModel:
+    """Load the Unitree G1 URDF that ``scripts/download.py`` puts in the cache.
 
-    The URDF declares ``<compiler meshdir="meshes"/>`` and also references
-    meshes as ``meshes/foo.STL`` — MuJoCo would concatenate to
-    ``meshes/meshes/foo.STL``. We rewrite meshdir to ``"."`` and supply the
-    mesh bytes through the ``assets`` dict so nothing touches the filesystem
-    a second time.
+    The URDF declares ``<compiler meshdir="meshes"/>`` and also gives each mesh as
+    ``meshes/foo.STL``, so MuJoCo would look for ``meshes/meshes/foo.STL``. The loader sets
+    meshdir to ``"."`` and gives MuJoCo the mesh bytes through ``assets``, so MuJoCo does
+    not read the mesh files a second time.
     """
-    urdf = Path(lafan_root) / LAFAN_G1_URDF_RELPATH
+    urdf = G1_URDF_PATH
     if not urdf.exists():
         raise FileNotFoundError(
-            f"G1 URDF not found at {urdf}. Run scripts/download_lafan.py first."
+            f"Cannot find the G1 URDF at {urdf}. Run scripts/download.py first."
         )
     text = re.sub(r'meshdir="[^"]*"', 'meshdir="."', urdf.read_text())
     assets = {f"meshes/{p.name}": p.read_bytes() for p in (urdf.parent / "meshes").glob("*.STL")}
@@ -177,27 +194,26 @@ def load_g1_model(lafan_root: Path) -> mujoco.MjModel:
 
 
 def joint_qpos_addr(model: mujoco.MjModel, joint_name: str) -> int:
-    """Index into ``data.qpos`` for a 1-DoF joint by name."""
+    """Return the ``qpos`` address of the 1-DoF joint ``joint_name``."""
     jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
     if jid < 0:
-        raise KeyError(f"Joint {joint_name!r} not found in model")
+        raise KeyError(f"The model has no joint {joint_name!r}.")
     return int(model.jnt_qposadr[jid])
 
 
 def body_id(model: mujoco.MjModel, body_name: str) -> int:
-    """Body id for ``body_name``, raising if absent."""
+    """Return the id of the body ``body_name``."""
     bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
     if bid < 0:
-        raise KeyError(f"Body {body_name!r} not found in model")
-    return int(bid)
+        raise KeyError(f"The model has no body {body_name!r}.")
+    return bid
 
 
 def lite_joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
-    """All hinge joint names of the Lite model, in the depth-first order of MuJoCo.
+    """Return the names of the Lite joints, except a free joint, in the order of MuJoCo.
 
-    Skips the free joint at index 0 when the model has one. The result gives the
-    order of the ``joint_pos`` columns, and the motion file stores it, so a
-    loader maps a column to a robot joint by name.
+    MuJoCo orders the joints depth first. The names give the column order of ``joint_pos``,
+    and the motion file stores them, so a loader maps a column to a robot joint by name.
     """
     names: list[str] = []
     for jid in range(model.njnt):
@@ -205,76 +221,58 @@ def lite_joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
             continue
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jid)
         if name is None:
-            raise RuntimeError(f"Lite joint id {jid} has no name")
+            raise RuntimeError(f"Lite joint {jid} has no name.")
         names.append(name)
     return tuple(names)
 
 
-# ── LAFAN1 CSV I/O ────────────────────────────────────────────────────────────
-
-
-def load_lafan_csv(path: Path) -> dict[str, np.ndarray]:
-    """Read one LAFAN1 G1 CSV into base pose + joint positions.
-
-    On-disk format: headerless, :data:`SOURCE_FPS`, ``[base_xyz(3), base_quat_xyzw(4),
-    joint_pos(29)]`` per row. Converts XYZW → WXYZ and flips quaternion sign
-    so ``w >= 0``.
-
-    Returns:
-        Dict with ``base_pos`` ``(T, 3)``, ``base_quat_wxyz`` ``(T, 4)``,
-        ``g1_joint_pos`` ``(T, 29)`` — all float32. Joint columns follow
-        :data:`G1_LAFAN_JOINT_NAMES`.
-    """
-    raw = np.loadtxt(path, delimiter=",", dtype=np.float32)
-    expected_cols = 7 + len(G1_LAFAN_JOINT_NAMES)
-    if raw.ndim != 2 or raw.shape[1] != expected_cols:
-        raise ValueError(
-            f"{path}: expected {expected_cols} columns, got shape {raw.shape}"
-        )
-    base_quat = np.empty((raw.shape[0], 4), dtype=np.float32)
-    base_quat[:, 0] = raw[:, 6]
-    base_quat[:, 1:4] = raw[:, 3:6]
-    base_quat /= np.linalg.norm(base_quat, axis=1, keepdims=True)
-    base_quat[base_quat[:, 0] < 0] *= -1.0
-    return {
-        "base_pos": raw[:, 0:3],
-        "base_quat_wxyz": base_quat,
-        "g1_joint_pos": raw[:, 7:],
-    }
+# ── Resampling ────────────────────────────────────────────────────────────────
 
 
 def resample_motion(
     motion: dict[str, np.ndarray], src_fps: int, dst_fps: int
 ) -> dict[str, np.ndarray]:
-    """Resample the output of :func:`load_lafan_csv` from ``src_fps`` onto ``dst_fps``.
+    """Resample the output of a G1 source loader from ``src_fps`` to ``dst_fps``.
 
-    The source is resampled, and not the retarget, so that the IK solves every frame
-    that reaches the file and the body poses stay the exact kinematics of the joints
+    The pipeline resamples the source, not the retarget, so that the IK solves every frame
+    that goes into the file, and the body poses stay the exact kinematics of the joints
     beside them.
 
-    Positions and joint angles interpolate linearly, and the base rotation by slerp.
-
-    The output grid is uniform, because a motion declares one rate and a loader indexes
-    it by frame. The last output sample therefore lands within one output period of the
-    last input sample, and the clip keeps it from landing past it, which ``Slerp``
+    Positions and joint angles interpolate linearly, and the base rotation by slerp. The
+    output grid is uniform, because a motion declares one rate and a loader indexes it by
+    frame. Thus the last output sample is within one output period of the last input
+    sample. The clip keeps it from going past the last input sample, which ``Slerp``
     rejects.
     """
     frames = motion["base_pos"].shape[0]
     if dst_fps == src_fps or frames < 2:
         return motion
-
-    t_src = np.arange(frames) / src_fps
-    t_dst = np.clip(
-        np.arange(round(t_src[-1] * dst_fps) + 1) / dst_fps, 0.0, t_src[-1]
-    )
-    rotations = Slerp(
-        t_src, Rotation.from_quat(motion["base_quat_wxyz"][:, [1, 2, 3, 0]])
-    )
+    t_src, t_dst = _resample_times(frames, src_fps, dst_fps)
     return {
         "base_pos": _interp(t_dst, t_src, motion["base_pos"]),
-        "base_quat_wxyz": rotations(t_dst).as_quat().astype(np.float32)[:, [3, 0, 1, 2]],
+        "base_quat_wxyz": _slerp(t_dst, t_src, motion["base_quat_wxyz"]),
         "g1_joint_pos": _interp(t_dst, t_src, motion["g1_joint_pos"]),
     }
+
+
+def resample_poses(
+    pos: np.ndarray, quat: np.ndarray, src_fps: int, dst_fps: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resample body poses ``(T, B, 3)`` and wxyz ``(T, B, 4)`` as :func:`resample_motion` does."""
+    frames = pos.shape[0]
+    if dst_fps == src_fps or frames < 2:
+        return pos, quat
+    t_src, t_dst = _resample_times(frames, src_fps, dst_fps)
+    pos_out = _interp(t_dst, t_src, pos.reshape(frames, -1)).reshape(len(t_dst), *pos.shape[1:])
+    quat_out = np.stack([_slerp(t_dst, t_src, quat[:, b]) for b in range(quat.shape[1])], axis=1)
+    return pos_out, quat_out
+
+
+def _resample_times(frames: int, src_fps: int, dst_fps: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return the sample times of the source, and the uniform output grid that spans them."""
+    t_src = np.arange(frames) / src_fps
+    t_dst = np.clip(np.arange(round(t_src[-1] * dst_fps) + 1) / dst_fps, 0.0, t_src[-1])
+    return t_src, t_dst
 
 
 def _interp(t_dst: np.ndarray, t_src: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -284,8 +282,14 @@ def _interp(t_dst: np.ndarray, t_src: np.ndarray, values: np.ndarray) -> np.ndar
     ).astype(np.float32)
 
 
+def _slerp(t_dst: np.ndarray, t_src: np.ndarray, quat: np.ndarray) -> np.ndarray:
+    """Slerp a ``(T, 4)`` wxyz rotation track onto ``t_dst``."""
+    rotations = Slerp(t_src, Rotation.from_quat(quat[:, [1, 2, 3, 0]]))
+    return rotations(t_dst).as_quat()[:, [3, 0, 1, 2]].astype(np.float32)
+
+
 def quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Hamilton product of two wxyz quaternion arrays, broadcast over leading axes."""
+    """Return the Hamilton product of two wxyz quaternion arrays, broadcast over leading axes."""
     aw, ax, ay, az = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
     bw, bx, by, bz = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
     return np.stack([
@@ -307,16 +311,16 @@ def world_poses(
     base_quat: np.ndarray,
     body_names: tuple[str, ...],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """World pose of :data:`BASE_BODY`, then of each of ``body_names``, per frame.
+    """Return the world pose of :data:`BASE_BODY`, then of each of ``body_names``, per frame.
 
-    The base leads the arrays because it is the frame the kinematics runs in and not a
-    body of the result: the Lite MJCF welds its pelvis to the origin, and MuJoCo fuses
-    the jointless root link of the G1 URDF into ``world``. Every pose a pass returns is
-    therefore pelvis-local, and the base trajectory ``(base_pos, base_quat)``, wxyz,
-    composes straight onto it.
+    The base comes first because it is the frame that the kinematics runs in, not a body of
+    the result. The Lite MJCF welds its pelvis to the origin, and MuJoCo fuses the root link
+    of the G1 URDF, which has no joint, into ``world``. Thus MuJoCo gives every body pose
+    relative to the pelvis, and the base trajectory ``(base_pos, base_quat)``, wxyz,
+    composes directly onto it.
 
-    ``joint_addrs`` gives the ``qpos`` address of each column of ``joint_pos``. A joint
-    of the model that no column addresses keeps its model default.
+    ``joint_addrs`` gives the ``qpos`` address of each column of ``joint_pos``. A joint of
+    the model that no column addresses keeps its model default.
 
     Returns ``(T, 1 + NB, 3)`` positions and ``(T, 1 + NB, 4)`` wxyz rotations.
     """
@@ -341,3 +345,84 @@ def world_poses(
             )
             pos[t, k], quat[t, k] = world_pos, world_quat
     return pos, quat
+
+
+class Sole(NamedTuple):
+    """The collision boxes of each foot, in the frame of its body, one entry per foot.
+
+    Each collision geom counts as the box that MuJoCo bounds it with (``geom_aabb``), which
+    is exact for a box and for a level capsule. The visual mesh does not count, because it
+    does not touch the floor in simulation.
+    """
+
+    centers: list[np.ndarray]
+    rotations: list[np.ndarray]
+    halves: list[np.ndarray]
+
+
+def sole(model: mujoco.MjModel, foot_names: tuple[str, ...]) -> Sole:
+    """Measure the collision boxes of ``foot_names`` on ``model``."""
+    centers, rotations, halves = [], [], []
+    for name in foot_names:
+        foot = body_id(model, name)
+        geoms = [
+            g for g in range(model.ngeom)
+            if model.geom_bodyid[g] == foot and (model.geom_contype[g] or model.geom_conaffinity[g])
+        ]
+        rotation = Rotation.from_quat(model.geom_quat[geoms][:, [1, 2, 3, 0]]).as_matrix()
+        centers.append(
+            model.geom_pos[geoms] + np.einsum("gij,gj->gi", rotation, model.geom_aabb[geoms, :3])
+        )
+        rotations.append(rotation)
+        halves.append(model.geom_aabb[geoms, 3:])
+    return Sole(centers, rotations, halves)
+
+
+def lowest_points(foot_sole: Sole, foot_pos: np.ndarray, foot_rot: np.ndarray) -> np.ndarray:
+    """Return the world position of the lowest point of each foot, ``(T, F, 3)``.
+
+    ``foot_pos`` ``(T, F, 3)`` and the rotation matrices ``foot_rot`` ``(T, F, 3, 3)`` are
+    the world pose of each foot body.
+    """
+    points = np.empty(foot_pos.shape, dtype=np.float32)
+    for f in range(foot_pos.shape[1]):
+        rotations = np.einsum("tij,gjk->tgik", foot_rot[:, f], foot_sole.rotations[f])
+        centers = foot_pos[:, f, None] + np.einsum(
+            "tij,gj->tgi", foot_rot[:, f], foot_sole.centers[f]
+        )
+        # A box reaches lowest at the corner whose every axis points down.
+        down = -np.sign(rotations[:, :, 2, :]) * foot_sole.halves[f]
+        lowest = centers + np.einsum("tgij,tgj->tgi", rotations, down)
+        points[:, f] = lowest[np.arange(len(lowest)), np.argmin(lowest[..., 2], axis=1)]
+    return points
+
+
+def sole_points(
+    model: mujoco.MjModel,
+    joint_addrs: np.ndarray,
+    joint_pos: np.ndarray,
+    base_pos: np.ndarray,
+    base_quat: np.ndarray,
+    foot_names: tuple[str, ...],
+) -> np.ndarray:
+    """Return the world position of the lowest point of each of ``foot_names``, ``(T, F, 3)``.
+
+    The arguments are those of :func:`world_poses`.
+    """
+    pos, quat = world_poses(model, joint_addrs, joint_pos, base_pos, base_quat, foot_names)
+    rot = Rotation.from_quat(quat[:, 1:].reshape(-1, 4)[:, [1, 2, 3, 0]]).as_matrix()
+    return lowest_points(sole(model, foot_names), pos[:, 1:], rot.reshape(*pos[:, 1:].shape, 3))
+
+
+def planted(points: np.ndarray, fps: int) -> np.ndarray:
+    """Return which feet of a source stand on the floor, per frame, ``(T, F)`` bool.
+
+    ``points`` ``(T, F, P, 3)`` are P world points of each of F feet, such as the ankle and
+    the ball of the foot. A foot is planted while one of its points moves slower than
+    :data:`CONTACT_SPEED` and is within :data:`CONTACT_HEIGHT` of the floor. The floor of a
+    point is the lowest it gets in the clip, taken as its 5th percentile, so that one bad
+    frame does not move it.
+    """
+    speed = np.linalg.norm(np.gradient(points, axis=0), axis=-1) * fps
+    near = points[..., 2] - np.percentile(points[..., 2], 5, axis=0) < CONTACT_HEIGHT
+    return np.any((speed < CONTACT_SPEED) & near, axis=-1)

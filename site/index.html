@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lite Motion Library</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+    "@huggingface/hub": "https://cdn.jsdelivr.net/npm/@huggingface/hub@2.17.5/+esm",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.min.js"
+  }
+}
+</script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="masthead">
+  <div class="brand">
+    <h1>Lite Motion Library</h1>
+    <p>Human motion retargeted to the Berkeley Lite Pro, from the original capture or through the Unitree G1. Point at a motion to play it. Open a motion to examine it frame by frame.</p>
+  </div>
+  <div class="search">
+    <label for="search" class="visually-hidden">Search motions</label>
+    <input id="search" type="search" placeholder="Search motions, such as walk or CMU/07" autocomplete="off" spellcheck="false">
+  </div>
+  <div id="account" class="account" hidden></div>
+</header>
+
+<div class="layout">
+  <aside class="filters" aria-label="Filters">
+    <section>
+      <h2>Source</h2>
+      <div id="sources" class="filter-list"></div>
+    </section>
+    <section>
+      <h2>Drives</h2>
+      <div id="drives" class="filter-list"></div>
+    </section>
+    <section>
+      <h2>Category</h2>
+      <div id="categories" class="filter-list"></div>
+    </section>
+  </aside>
+
+  <main>
+    <div class="toolbar">
+      <p id="count" class="count">Loading motions</p>
+      <div class="toolbar-end">
+        <div class="figure-choice" role="group" aria-label="Figure" hidden>
+          <button type="button" data-figure="character" aria-pressed="true">Animation</button>
+          <button type="button" data-figure="robot" aria-pressed="false">URDF</button>
+        </div>
+        <label class="sort" for="sort">Sort
+          <select id="sort">
+            <option value="name">Name</option>
+            <option value="longest">Longest first</option>
+            <option value="shortest">Shortest first</option>
+            <option value="travel">Most travel first</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div id="grid" class="grid"></div>
+    <div id="more" class="more" aria-hidden="true"></div>
+    <div id="notice" class="notice" hidden></div>
+  </main>
+</div>
+
+<div id="viewer" class="viewer" role="dialog" aria-modal="true" aria-labelledby="viewer-name" hidden>
+  <div class="viewer-stage">
+    <canvas id="viewer-canvas" aria-label="The motion, played by the character or the robot. Drag to orbit. Scroll to zoom."></canvas>
+    <p id="viewer-loading" class="viewer-loading" hidden>Loading motion</p>
+    <div class="controls">
+      <button id="play" class="play" type="button" aria-label="Pause">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path class="icon-pause" d="M4 3h3v10H4zM9 3h3v10H9z"/><path class="icon-play" d="M4 2.5v11l9-5.5z"/></svg>
+      </button>
+      <input id="scrub" type="range" min="0" max="1" step="1" value="0" aria-label="Frame">
+      <span id="clock" class="clock">0.00 s</span>
+      <label for="speed" class="visually-hidden">Speed</label>
+      <select id="speed">
+        <option value="0.25">0.25×</option>
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+      </select>
+      <label class="toggle"><input id="follow" type="checkbox" checked> Follow</label>
+      <label class="toggle"><input id="trail" type="checkbox" checked> Path</label>
+      <div class="figure-choice" role="group" aria-label="Figure" hidden>
+        <button type="button" data-figure="character" aria-pressed="true">Animation</button>
+        <button type="button" data-figure="robot" aria-pressed="false">URDF</button>
+      </div>
+    </div>
+  </div>
+
+  <aside class="viewer-info">
+    <div class="viewer-nav">
+      <button id="prev" type="button">Previous</button>
+      <button id="next" type="button">Next</button>
+      <button id="close" type="button" class="close">Close</button>
+    </div>
+    <p id="viewer-source" class="eyebrow"></p>
+    <h2 id="viewer-name" class="viewer-name"></h2>
+    <dl id="viewer-stats" class="stats"></dl>
+    <div class="actions">
+      <a id="open-rerun" class="button primary" target="_blank" rel="noopener" hidden>Open in the Rerun web viewer</a>
+      <p class="command-label">To open the layers in Rerun, run this command in the repository:</p>
+      <div class="command">
+        <code id="command"></code>
+        <button id="copy" type="button">Copy</button>
+      </div>
+    </div>
+    <p class="keys"><kbd>Space</kbd> play <kbd>←</kbd><kbd>→</kbd> frame <kbd>↑</kbd><kbd>↓</kbd> motion <kbd>Esc</kbd> close</p>
+  </aside>
+</div>
+</body>
+</html>

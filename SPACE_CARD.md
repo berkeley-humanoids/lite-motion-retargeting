@@ -1,5 +1,5 @@
 ---
-title: Lite Motion Dataset
+title: Lite Motions
 emoji: 🤖
 colorFrom: blue
 colorTo: yellow
@@ -14,7 +14,7 @@ hf_oauth_scopes:
 - gated-repos
 ---
 
-# Lite Motion Dataset
+# Lite Motions
 
 This Space is the motion browser of [Lite-Motion-Retargeting][retarget]. It plays human
 motion, retargeted from the Unitree G1 to the Berkeley Lite Pro, in your browser.

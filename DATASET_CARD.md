@@ -23,7 +23,7 @@ This dataset holds 40 [LAFAN1][lafan1] motions at 50 Hz.
 Lite Pro humanoid, and kept the 30 Hz source clip beside each motion. Each motion is one
 [Rerun](https://rerun.io) recording. You can [open one in your browser][viewer], with no
 install. The [table below](#motions) links every motion, and the
-[Lite Motion Dataset][browser] Space plays all of them on one page.
+[Lite Motions][browser] Space plays all of them on one page.
 
 ```bash
 hf download Berkeley-Humanoids/Lite-LAFAN1-Dataset --repo-type dataset \
@@ -85,5 +85,5 @@ CC BY-NC 4.0, inherited from LAFAN1. Non-commercial use only.
 
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
 [retarget]: https://github.com/Berkeley-Humanoids/Lite-Motion-Retargeting
-[browser]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motion-Dataset
+[browser]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motions
 [viewer]: https://rerun.io/viewer?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2FBerkeley-Humanoids%2FLite-LAFAN1-Dataset%2Fresolve%2Fmain%2Flite_pro%2Flafan1_dance1_subject1.rrd

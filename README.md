@@ -7,7 +7,7 @@ layered [Rerun](https://rerun.io) motion.
 
 The LAFAN1 motions are on the Hub in [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset].
 You can [open one in a browser][viewer], or browse all of them in the
-[Lite Motion Dataset][space] Space.
+[Lite Motions][space] Space.
 
 ## Sources
 
@@ -381,7 +381,7 @@ reads the older single-layer `tracking/*.rrd`. It needs a reader for this store 
 can train on these motions.
 
 [dataset]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-LAFAN1-Dataset
-[space]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motion-Dataset
+[space]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motions
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
 [lafan1bvh]: https://github.com/ubisoft/ubisoft-laforge-animation-dataset
 [amass]: https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics

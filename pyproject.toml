@@ -18,3 +18,7 @@ dependencies = [
     "tqdm>=4.66",
     "tyro>=0.9",
 ]
+
+[project.optional-dependencies]
+# ReActor trains in MuJoCo Warp. mjlab pins MuJoCo, which the IK then runs on too.
+reactor = ["mjlab>=1.6"]

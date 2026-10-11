@@ -114,6 +114,7 @@ token of their account, so a private repo shows only to those who can read it.
 | `sources.py` | The sources, the loader that reads a clip of each, and how a motion is named. |
 | `human.py` | The human skeleton that every human source maps onto, and the LAFAN1 BVH reader. |
 | `mapping.py` | The goal of each Lite link from a human pose, the foot planting, and the IK that reaches the goals. |
+| `reactor.py` | Retargets the motions of a store again, by RL in physics, after ReActor. See [ReActor](#reactor). |
 | `store.py` | Defines the file format. |
 | `publish.py` | Fills the motion index of `DATASET_CARD.md`, uploads it with the store and the browser data, then the page to the Space. |
 | `build_site.py` | Writes the motions and the robot meshes that `site/` plays into `site/data/`. |
@@ -239,6 +240,94 @@ more of the 40 takes.
 
 The IK solves against the Lite Pro MJCF of `lite-description`, and the robot layer draws
 the URDF of the same package. A new asset version therefore gives new motions.
+
+## ReActor
+
+`reactor.py` retargets the motions of a store again, in physics, after Disney's
+[ReActor](https://arxiv.org/abs/2605.06593). The IK of `retarget.py` knows nothing of
+mass, contact or torque, so its motions can float, sink, slide, or ask more of a motor
+than it has. ReActor tracks the same goals with a policy in MuJoCo Warp, through mjlab,
+and the simulated motion is the retarget:
+
+1. **Policy.** It sets a PD target per joint around the IK solution of the frame, and pushes
+   the pelvis with a wrench. The reward follows table 1 of the paper and penalizes the
+   wrench, so the policy learns to need little of it.
+2. **Goals.** They learn a position and an orientation offset per link, and a height offset
+   per motion. After each PPO iteration, one gradient step moves them toward where the
+   simulated links went, with the approximate bilevel gradient of the paper.
+3. **Export.** The policy plays each motion from its first frame to its end. The
+   simulated joints become a robot layer of a new store, with the learned goals, the
+   metrics of `retarget.py`, and the peak and mean wrench. Where play loses track of the
+   goals, export cuts the motion into pieces, as told below.
+
+The simulation is ideal: a PD position actuator per joint with the armature and effort
+limit of the MJCF, every collision geom of the MJCF, and no noise, delay or domain
+randomization. ReActor makes reference motions. The policy that runs on the robot trains
+on them in [Lite-Motion-Tracking](https://github.com/Berkeley-Humanoids/Lite-Motion-Tracking).
+
+ReActor reads the robot layers of a store, so it runs on any source that `retarget.py`
+wrote, human or G1. It welds every joint that no motion drives, such as the fingers. The
+`reactor` extra adds mjlab, which pins MuJoCo to 3.11 for the whole project.
+
+```bash
+uv run --extra reactor scripts/reactor.py train --source lafan1bvh --clip '^walk' --iterations 3000
+uv run --extra reactor scripts/reactor.py export --run logs/reactor/<run> --out dataset_reactor
+```
+
+`train` writes its run to `logs/reactor/`, with the motions it read (`library.npz`), the
+goal offsets (`goals.pt`), the PPO checkpoints, and TensorBoard logs. With 4,096 envs on
+one RTX A4500, an iteration takes 1.6 s.
+
+A LAFAN1 take runs for minutes, and a policy trained on 10 s episodes can stumble in one.
+`export` then cuts the motion 1 s before the stumble, starts again from the IK solution,
+and writes each piece of 2 s or more as `<motion>_f<first frame>`. A motion that never
+stumbles keeps its name. The pieces after a stumble track worse, and their metrics say so.
+
+Two runs on LAFAN1 give the first results:
+
+| Run | Takes | Iterations | Time | Kept | Lost track | Played whole |
+|---|---|---|---|---|---|---|
+| Walking | 12 | 3,000 | 1.3 h | 99% of 48 min | 39 times | 6 takes |
+| All | 77 | 10,000 | 4.4 h | 98% of 276 min | 354 times | 26 takes |
+
+On the takes that each run played whole, against the IK, weighted by length:
+
+| Metric | Walking run | IK | All run | IK |
+|---|---|---|---|---|
+| Foot slide | 2.75 cm/s | 1.97 cm/s | 3.53 cm/s | 2.51 cm/s |
+| Planted gap | 0.14 cm | 0.33 cm | 0.18 cm | 0.73 cm |
+| Penetration | 0.50 cm | 0.92 cm | 0.61 cm | 1.46 cm |
+| Fastest joint | | | 25 rad/s | 19 rad/s |
+| Goal error, feet | 6.8 cm | 0.2 cm | 8.3 cm | 0.3 cm |
+| Root wrench, mean | | none | 24 N | none |
+| Root wrench, peak | 65 to 107 N | none | 265 N | none |
+
+The simulated feet sit on the floor better than the IK feet: the run on all takes has a
+smaller planted gap on all 26 takes, and less penetration on 23. But the feet slide more,
+the joints move faster, and the policy leans on the wrench. Lite Pro weighs 327 N. The mean
+wrench is 7% of that weight, and the peak is 80%. Over all 77 takes, the mean wrench goes
+from 17 N on the walking takes to 61 N on the obstacle takes, and no motion has a mean
+below 10 N. The falls and the motions on the ground are the worst, with a foot slide of 9
+to 13 cm/s.
+
+On the walking takes, the run on all takes does better than the walking run: less foot
+slide on all 9 motions that both runs wrote, and less goal error on 7. Its peak wrench is
+higher.
+
+The paper trains for 20,000 iterations, and names the wrench penalty its most sensitive
+setting. The test that counts is downstream: a tracking policy without the wrench, trained
+on either set of motions.
+
+The implementation departs from the paper in four places. There is no public code of the
+paper to compare against, and the unofficial reproduction has no license, so none of its
+code is used here.
+
+| Paper | Here | Why |
+|---|---|---|
+| PD targets, and a reset at the nominal pose with a ramp-in | PD targets around the IK solution, and a reset at the IK state | The IK solution exists, so the policy starts from it |
+| Offsets on the source body frames | Offsets on the goals of `mapping.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
+| Offset bounds of 0.5 | 0.1 m, 0.3 rad, 0.05 m | Lite is about 1 m tall |
+| Projected SGD on the offsets | Adam, then the projection | The paper gives no step size |
 
 ## The file format
 

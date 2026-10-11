@@ -1,29 +1,30 @@
 """ReActor: retarget by reinforcement learning in physics, after Disney's ReActor.
 
 Paper: "ReActor: Reinforcement Learning for Physics-Aware Motion Retargeting",
-https://arxiv.org/abs/2605.06593. Its equation numbers are cited below.
+https://arxiv.org/abs/2605.06593. The equation and table numbers below are those of the paper.
 
 ``retarget.py`` gives each Lite link a goal pose and an IK solution that reaches it. The
-IK knows nothing of mass, contact or torque, so a motion can float, sink, slide, or ask
-more of a motor than it has. ReActor tracks the goals with a policy in MuJoCo Warp, and the
-simulated motion is the retarget. The policy sets a PD target per joint around the IK
-solution of the frame, and pushes the pelvis with a wrench (eq. 18, 19). The reward
-penalizes the wrench, so the policy learns to need little of it.
+IK knows nothing of mass, contact or torque, so a motion can float, sink, slide, or ask a
+motor for more torque than it has. ReActor tracks the goals with a policy in MuJoCo Warp,
+and the simulated motion is the retarget. The policy sets a PD target per joint around the
+IK solution of the frame, and pushes the pelvis with a wrench (eq. 18, 19). The reward
+penalizes the wrench, so the policy learns to use little of it.
 
-While the policy trains, the goals learn too: a position and an orientation offset per
-link, in the frame of the link, and a height offset per motion (eq. 10, 11, 14). After the
-rollout of every PPO iteration, one step of gradient descent moves them toward where the
-simulated links went, with the approximate bilevel gradient of eq. 6 at alpha = 0. The
-goals then ask for what the robot can do.
+The goals learn while the policy trains. Each link has a position offset and an orientation
+offset in its own frame, and each motion has a height offset (eq. 10, 11, 14). After the
+warm start, one step of gradient descent follows the rollout of each PPO iteration. The step
+moves the offsets toward the poses that the simulated links reached, with the approximate
+bilevel gradient of eq. 6 at alpha = 0. Thus the goals come to ask for what the robot can do.
 
-The simulation is ideal: a PD position actuator per joint with the armature and the
-effort limit of the MJCF, every collision geom of the MJCF, and no noise, delay or domain
+The simulation is ideal: a PD position actuator per joint with the armature and the effort
+limit of the MJCF, every collision geom of the MJCF, and no noise, delay or domain
 randomization. ReActor makes reference motions, not a policy to deploy. A tracking policy
 for the robot trains on its output, in Lite-Motion-Tracking.
 
-It reads the store that ``retarget.py`` wrote, and writes another: one robot layer per
-motion, with the simulated joints, the learned goals, and the metrics of
-``retarget.motion_metrics``. A joint that no motion drives, such as a finger, is welded.
+ReActor reads the store that ``retarget.py`` wrote, and writes a new store. The new store
+has one robot layer per motion, with the simulated joints, the learned goals, and the
+metrics of ``retarget.motion_metrics``. ReActor welds each joint that no motion drives,
+such as a finger joint.
 
 Usage:
     uv run --extra reactor scripts/reactor.py train --source lafan1bvh --clip '^walk'
@@ -95,40 +96,61 @@ from retarget import DATASET_ROOT, load_models, motion_metrics  # noqa: E402
 from sources import SOURCES, clip_key, motion_name  # noqa: E402
 from store import BASE_LAYER, write_asset, write_blueprint, write_robot_layer  # noqa: E402
 
-REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-LOG_ROOT: Path = REPO_ROOT / "logs" / "reactor"
+LOG_ROOT: Path = Path(__file__).resolve().parent.parent / "logs" / "reactor"
 ROBOT: str = "lite_pro"
+DEVICE: str = "cuda:0"
 
-#: Hz. The closed-loop natural frequency of every PD actuator, kp = armature * w^2. The
-#: Damiao motors of the tracking task use 5 Hz, and every joint here does, which leaves the
-#: policy a wider range of targets than 10 Hz would.
+#: Hz. The closed-loop natural frequency of every PD actuator: stiffness = armature * w^2.
+#: The tracking task uses 5 Hz for its Damiao motors, and so does every joint here. At 5 Hz,
+#: the stiffness is a quarter of that at 10 Hz, which gives the policy a wider range of targets.
 NATURAL_FREQUENCY_HZ: float = 5.0
 
-#: The weights of the upper-level loss, eq. 17 and table 2: position and orientation.
+#: The weights of position and orientation in the upper-level loss, eq. 17 and table 2.
 GOAL_POSITION_WEIGHT: float = 10.0
 GOAL_ORIENTATION_WEIGHT: float = 1.0
 
 #: The bounds of the learned offsets, eq. 14: metres, radians, metres. Table 2 of the paper
-#: sets all three to 0.5. Lite is about 1 m tall and its goals already fit it, so these are
-#: tighter.
+#: sets all three to 0.5. Lite is about 1 m tall and its goals already fit it, so these
+#: bounds are tighter.
 OFFSET_POSITION_BOUND: float = 0.1
 OFFSET_ORIENTATION_BOUND: float = 0.3
 OFFSET_HEIGHT_BOUND: float = 0.05
 
-#: Frames ahead, besides the current one, that the policy sees the goals of.
+#: Env steps per PPO iteration. The offsets learn once per iteration, from its steps.
+STEPS_PER_ITERATION: int = 24
+
+#: The policy sees the goals of the current frame and of the frame this many frames later.
 LOOKAHEAD: int = 5
 
-#: Seconds. Export drops the first of these before the frame where play lost track, which
-#: holds the stumble, and keeps no piece shorter than the second.
+#: Seconds. Where play lost track, export drops this much motion before that frame, because
+#: that motion holds the stumble.
 CUT_SECONDS: float = 1.0
+#: Seconds. Export drops each piece that is shorter.
 PIECE_SECONDS: float = 2.0
 
 
 # ── The motions ───────────────────────────────────────────────────────────────
 
 
+def motion_paths(source: str, clip: str | None, store: Path) -> list[Path]:
+    """Return the robot layers in ``store`` of the clips of ``source`` that match ``clip``."""
+    spec = SOURCES[source]
+    clip_dir = CACHE_ROOT / source / spec.clip_dir
+    paths = [
+        store / ROBOT / f"{motion_name(source, clip_dir, path)}.rrd"
+        for path in sorted(clip_dir.glob(spec.clip_glob))
+        if clip is None or re.search(clip, clip_key(clip_dir, path))
+    ]
+    if not paths:
+        raise SystemExit(f"No clip in {clip_dir} matches {clip!r}.")
+    missing = [path for path in paths if not path.exists()]
+    if missing:
+        raise SystemExit(f"{len(missing)} of {len(paths)} motions are not in {store}. Run scripts/retarget.py.")
+    return paths
+
+
 def read_motion(path: Path) -> dict:
-    """The arrays of one robot layer: joints, goals, and the joints its source drives."""
+    """Read one robot layer: its joints, its goals, and the joints that its source drives."""
     columns: dict[str, list[pa.RecordBatch]] = {}
     properties = None
     for chunk in RrdReader(path).stream():
@@ -138,7 +160,7 @@ def read_motion(path: Path) -> dict:
         elif entity == f"/{ROBOT}/joint/positions" or entity.startswith(f"/{ROBOT}/goal/poses/"):
             columns.setdefault(entity, []).append(chunk.to_record_batch())
     if properties is None:
-        raise SystemExit(f"{path}: no /__properties/{ROBOT}. Is it a robot layer?")
+        raise SystemExit(f"{path} has no /__properties/{ROBOT}, so it is not a robot layer.")
 
     def values(entity: str, component: str, width: int) -> np.ndarray:
         table = pa.Table.from_batches(columns[entity]).sort_by("frame")
@@ -150,6 +172,7 @@ def read_motion(path: Path) -> dict:
     joint_names = properties["joint_names"][0]
     bodies = properties["body_names"][0]
     poses = [f"/{ROBOT}/goal/poses/{body}" for body in bodies]
+    goal_quat = np.stack([values(entity, "Transform3D:quaternion", 4) for entity in poses], axis=1)
     return {
         "fps": properties["fps"][0][0],
         "joint_names": joint_names,
@@ -158,35 +181,32 @@ def read_motion(path: Path) -> dict:
         "sources": properties["source_body_names"][0],
         "joint_pos": values(f"/{ROBOT}/joint/positions", "Scalars:scalars", len(joint_names)),
         "goal_pos": np.stack([values(entity, "Transform3D:translation", 3) for entity in poses], axis=1),
-        # Rerun stores xyzw.
-        "goal_quat": np.stack([values(entity, "Transform3D:quaternion", 4) for entity in poses], axis=1)[..., [3, 0, 1, 2]],
+        "goal_quat": goal_quat[..., [3, 0, 1, 2]],  # Rerun stores xyzw.
     }
 
 
 def build_library(paths: list[Path], out: Path) -> Path:
-    """Read every motion of ``paths`` into one ``library.npz`` under ``out``, and return it.
+    """Write the motions of ``paths`` to one ``library.npz`` in ``out``, and return its path.
 
     The motions run end to end. The joints are those of the simulated robot, in its order:
-    every joint some motion drives. The velocities that a reset needs are differenced.
+    every joint that some motion drives. The velocities that a reset needs are finite
+    differences of the positions.
     """
     motions = [read_motion(path) for path in paths]
     bodies = motions[0]["bodies"]
     for path, motion in zip(paths, motions, strict=True):
         if motion["fps"] != FPS or motion["bodies"] != bodies:
-            raise SystemExit(f"{path}: not at {FPS} Hz, or not with the goals of {paths[0].name}.")
-    active = set().union(*(motion["active"] for motion in motions))
-    joints = robot_joints(active)
+            raise SystemExit(f"{path} is not at {FPS} Hz, or its goals differ from those of {paths[0].name}.")
+    joints = robot_joints(set().union(*(motion["active"] for motion in motions)))
 
-    columns = [[motion["joint_names"].index(name) for name in joints] for motion in motions]
-    joint_pos = [motion["joint_pos"][:, cols] for motion, cols in zip(motions, columns, strict=True)]
-    root_pos = [motion["goal_pos"][:, 0] for motion in motions]
-    root_quat = [motion["goal_quat"][:, 0] for motion in motions]
+    joint_pos = [motion["joint_pos"][:, [motion["joint_names"].index(name) for name in joints]] for motion in motions]
     lengths = np.array([len(pos) for pos in joint_pos])
-    path = out / "library.npz"
+    library = out / "library.npz"
     np.savez(
-        path,
+        library,
+        # Export copies the base layers from this store.
         store=str(paths[0].parent.parent),
-        names=np.array([p.stem for p in paths]),
+        names=np.array([path.stem for path in paths]),
         lengths=lengths,
         starts=np.concatenate([[0], np.cumsum(lengths)[:-1]]),
         bodies=np.array(bodies),
@@ -197,17 +217,18 @@ def build_library(paths: list[Path], out: Path) -> Path:
         goal_quat=np.concatenate([motion["goal_quat"] for motion in motions]),
         joint_pos=np.concatenate(joint_pos),
         joint_vel=np.concatenate([np.gradient(q, axis=0) * FPS for q in joint_pos]),
-        root_lin_vel=np.concatenate([np.gradient(p, axis=0) * FPS for p in root_pos]),
-        root_ang_vel=np.concatenate([_angular_velocity(q) for q in root_quat]),
+        root_lin_vel=np.concatenate([np.gradient(motion["goal_pos"][:, 0], axis=0) * FPS for motion in motions]),
+        root_ang_vel=np.concatenate([_angular_velocity(motion["goal_quat"][:, 0]) for motion in motions]),
     )
-    return path
+    return library
 
 
 def _angular_velocity(quat: np.ndarray) -> np.ndarray:
-    """World angular velocity ``(T, 3)`` of wxyz rotations ``(T, 4)``, central difference."""
+    """Return the world angular velocity ``(T, 3)`` of wxyz rotations ``(T, 4)``, by central differences."""
     q = torch.from_numpy(quat)
     ahead, behind = torch.cat([q[1:], q[-1:]]), torch.cat([q[:1], q[:-1]])
     step = quat_mul(ahead, quat_inv(behind))
+    # q and -q are one rotation. Take the short way.
     step = torch.where(step[:, :1] < 0, -step, step)
     span = np.r_[1, np.full(len(q) - 2, 2), 1][: len(q)] / FPS
     return (2.0 * step[:, 1:].numpy() / span[:, None]).astype(np.float32)
@@ -217,8 +238,10 @@ def _angular_velocity(quat: np.ndarray) -> np.ndarray:
 
 
 def lite_spec(joints: tuple[str, ...]) -> mujoco.MjSpec:
-    """Lite Pro with a free base, no stock actuators or sensors, and every hinge outside
-    ``joints`` welded at 0."""
+    """Load Lite Pro with a free base and no actuators or sensors.
+
+    This welds each hinge that is not in ``joints`` at 0.
+    """
     spec = mujoco.MjSpec.from_file(str(get_mjcf_path(ROBOT)))
     spec.body("pelvis").add_freejoint()
     for actuator in list(spec.actuators):
@@ -232,34 +255,40 @@ def lite_spec(joints: tuple[str, ...]) -> mujoco.MjSpec:
 
 
 def robot_joints(active: set[str]) -> tuple[str, ...]:
-    """The joints of ``active`` in the order of the MJCF, which is that of the robot entity."""
+    """Return the joints of ``active`` in the order of the MJCF, which is the order of the robot entity."""
     model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(ROBOT)))
     names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)]
     return tuple(name for name in names if name in active)
 
 
-def robot_cfg(joints: tuple[str, ...]) -> EntityCfg:
-    """The robot entity: ``joints`` actuated by ideal PD, the rest welded.
+def pd_gains(joints: tuple[str, ...]) -> dict[str, tuple[float, float, float]]:
+    """Return the stiffness, the damping and the effort limit of each of ``joints``.
 
-    A joint keeps the armature and the effort limit of the MJCF. Its gains come from
-    :data:`NATURAL_FREQUENCY_HZ`, with a damping ratio of 2, as BeyondMimic sets them.
+    A joint keeps the armature and the effort limit of its actuator in the MJCF. Its gains
+    come from :data:`NATURAL_FREQUENCY_HZ`, with a damping ratio of 2, as BeyondMimic sets them.
     """
     model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(ROBOT)))
     omega = 2.0 * np.pi * NATURAL_FREQUENCY_HZ
-    groups: dict[tuple[float, float], list[str]] = {}
+    gains = {}
     for actuator in range(model.nu):
-        joint = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, model.actuator_trnid[actuator, 0])
+        joint_id = model.actuator_trnid[actuator, 0]
+        joint = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
         if joint in joints:
-            armature = float(model.dof_armature[model.jnt_dofadr[model.actuator_trnid[actuator, 0]]])
-            groups.setdefault((armature, float(model.actuator_forcerange[actuator, 1])), []).append(joint)
+            armature = float(model.dof_armature[model.jnt_dofadr[joint_id]])
+            gains[joint] = armature * omega**2, 4.0 * armature * omega, float(model.actuator_forcerange[actuator, 1])
+    return gains
+
+
+def robot_cfg(joints: tuple[str, ...]) -> EntityCfg:
+    """Return the robot entity: ``joints`` with ideal PD actuators, and every other hinge welded."""
+    groups: dict[tuple[float, float, float], list[str]] = {}
+    for joint, gains in pd_gains(joints).items():
+        groups.setdefault(gains, []).append(joint)
     actuators = tuple(
         BuiltinPositionActuatorCfg(
-            target_names_expr=tuple(names),
-            stiffness=armature * omega**2,
-            damping=4.0 * armature * omega,
-            effort_limit=effort,
+            target_names_expr=tuple(names), stiffness=stiffness, damping=damping, effort_limit=effort
         )
-        for (armature, effort), names in groups.items()
+        for (stiffness, damping, effort), names in groups.items()
     )
     return EntityCfg(
         init_state=EntityCfg.InitialStateCfg(pos=(0.0, 0.0, 0.8)),
@@ -268,42 +297,28 @@ def robot_cfg(joints: tuple[str, ...]) -> EntityCfg:
     )
 
 
-def action_scales(joints: tuple[str, ...]) -> dict[str, float]:
-    """Per joint, the target offset of a unit action: a quarter of the effort limit over kp."""
-    model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(ROBOT)))
-    omega = 2.0 * np.pi * NATURAL_FREQUENCY_HZ
-    scales = {}
-    for actuator in range(model.nu):
-        joint_id = model.actuator_trnid[actuator, 0]
-        joint = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
-        if joint in joints:
-            stiffness = model.dof_armature[model.jnt_dofadr[joint_id]] * omega**2
-            scales[joint] = float(0.25 * model.actuator_forcerange[actuator, 1] / stiffness)
-    return scales
-
-
 # ── The goals, and the command that steps through them ────────────────────────
 
 
 @dataclass(kw_only=True)
 class GoalCommandCfg(CommandTermCfg):
-    """The goals of the motions in ``library``, and the offsets they learn."""
+    """The goals of the motions in ``library``, and the offsets that they learn."""
 
     library: str
     entity_name: str = "robot"
+    #: Draw a new motion only at a reset, never on a timer.
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
-    #: Learn the offsets. Off, they stay at those of ``offsets``, or at zero.
+    #: Learn the offsets. If this is off, the offsets stay at those of ``offsets``, or at zero.
     learn: bool = True
-    #: A ``goals.pt`` to start the offsets from, and where to save them as they learn.
+    #: A ``goals.pt`` to start the offsets from.
     offsets: str | None = None
+    #: The ``goals.pt`` to save the offsets to as they learn.
     save_to: str | None = None
-    #: Env steps per PPO iteration, which is how often the offsets learn.
-    steps_per_iteration: int = 24
-    #: PPO iterations before the offsets start to learn, so the policy tracks first.
+    #: PPO iterations before the offsets start to learn, so that the policy learns to track first.
     warmstart: int = 1000
     learning_rate: float = 1e-3
-    #: Play motion i in env i from ``GoalCommand.playback_start``, and never resample: for
-    #: export.
+    #: For export: play motion i in env i from ``GoalCommand.playback_start``, and never draw
+    #: another motion.
     playback: bool = False
 
     def build(self, env: ManagerBasedRlEnv) -> "GoalCommand":
@@ -313,8 +328,8 @@ class GoalCommandCfg(CommandTermCfg):
 class GoalCommand(CommandTerm):
     """Steps each env through a motion of the library, and poses the goals of its frame.
 
-    ``frame`` is the frame the robot should reach at the end of the coming step. A reset
-    puts the robot at the IK solution of the frame before it.
+    ``frame`` is the frame that the robot should reach at the end of the coming step. A
+    reset puts the robot at the IK solution of the frame before it.
     """
 
     cfg: GoalCommandCfg
@@ -331,7 +346,7 @@ class GoalCommand(CommandTerm):
         self.motion_of = torch.repeat_interleave(torch.arange(len(self.starts), device=self.device), self.lengths)
         self.body_ids = self.robot.find_bodies(list(library["bodies"]), preserve_order=True)[0]
         if tuple(library["joints"]) != self.robot.joint_names:
-            raise RuntimeError("The library joints are not those of the robot, in its order.")
+            raise RuntimeError("The library joints differ from the robot joints, or are in a different order.")
 
         bodies, motions = len(self.body_ids), len(self.starts)
         self.offset_pos = torch.zeros(bodies, 3, device=self.device, requires_grad=True)
@@ -347,18 +362,17 @@ class GoalCommand(CommandTerm):
 
         self.motion = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.frame = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        #: The frame each env starts its motion from, in playback.
+        #: The frame that each env starts its motion from, in playback.
         self.playback_start = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.trials = torch.zeros(motions, device=self.device)
         self.failures = torch.zeros(motions, device=self.device)
         self.goal_pos = torch.zeros(self.num_envs, bodies, 3, device=self.device)
         self.goal_quat = torch.zeros(self.num_envs, bodies, 4, device=self.device)
 
-        steps = cfg.steps_per_iteration
-        self.sample_index = torch.zeros(steps, self.num_envs, dtype=torch.long, device=self.device)
-        self.sample_pos = torch.zeros(steps, self.num_envs, bodies, 3, device=self.device)
-        self.sample_quat = torch.zeros(steps, self.num_envs, bodies, 4, device=self.device)
-        self.sample_valid = torch.zeros(steps, self.num_envs, dtype=torch.bool, device=self.device)
+        self.sample_index = torch.zeros(STEPS_PER_ITERATION, self.num_envs, dtype=torch.long, device=self.device)
+        self.sample_pos = torch.zeros(STEPS_PER_ITERATION, self.num_envs, bodies, 3, device=self.device)
+        self.sample_quat = torch.zeros(STEPS_PER_ITERATION, self.num_envs, bodies, 4, device=self.device)
+        self.sample_valid = torch.zeros(STEPS_PER_ITERATION, self.num_envs, dtype=torch.bool, device=self.device)
         self.steps = 0
         self.iteration = 0
         self._errors_at = -1
@@ -373,34 +387,42 @@ class GoalCommand(CommandTerm):
 
     @property
     def command(self) -> torch.Tensor:
-        """The goals of the current frame and of :data:`LOOKAHEAD` frames on, in the root frame."""
-        ahead = self.starts[self.motion] + torch.minimum(self.frame + LOOKAHEAD, self.lengths[self.motion] - 1)
+        """The goals of the current frame and of a frame ahead, relative to the root.
+
+        The frame ahead is :data:`LOOKAHEAD` frames later, or the last frame of the motion.
+        Each goal is a position and the first two columns of a rotation matrix.
+        """
+        frame = torch.minimum(self.frame + LOOKAHEAD, self.lengths[self.motion] - 1)
         with torch.no_grad():
-            pos_ahead, quat_ahead = self.goals(ahead)
-        root_pos = self.robot.data.root_link_pos_w - self._env.scene.env_origins
-        root_quat = self.robot.data.root_link_quat_w
+            ahead = self.goals(self.starts[self.motion] + frame)
+        root_pos = (self.robot.data.root_link_pos_w - self._env.scene.env_origins)[:, None]
+        root_quat = self.robot.data.root_link_quat_w[:, None]
         features = []
-        for pos, quat in ((self.goal_pos, self.goal_quat), (pos_ahead, quat_ahead)):
-            root_pos_b = root_pos[:, None].expand_as(pos)
-            root_quat_b = root_quat[:, None].expand_as(quat)
-            local_pos = quat_apply_inverse(root_quat_b, pos - root_pos_b)
-            local_rot = matrix_from_quat(quat_mul(quat_inv(root_quat_b), quat))[..., :2]
+        for pos, quat in ((self.goal_pos, self.goal_quat), ahead):
+            root = root_quat.expand_as(quat)
+            local_pos = quat_apply_inverse(root, pos - root_pos)
+            local_rot = matrix_from_quat(quat_mul(quat_inv(root), quat))[..., :2]
             features += [local_pos.flatten(1), local_rot.flatten(1)]
         return torch.cat(features, dim=1)
 
     @property
     def reference_joint_pos(self) -> torch.Tensor:
+        """The IK solution of the frame of each env."""
         return self.ref_joint_pos[self.index]
 
     def goals(self, index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """The goals of library frames ``index``, with the learned offsets, eq. 10 and 11."""
+        """Return the goals of the library frames ``index`` with the learned offsets, eq. 10 and 11."""
         pos0, quat0 = self.goal_pos0[index], self.goal_quat0[index]
         lift = self.offset_z[self.motion_of[index]][..., None, None].expand(*pos0.shape[:-1], 1)
         pos = pos0 + quat_apply(quat0, self.offset_pos.expand_as(pos0)) + torch.nn.functional.pad(lift, (2, 0))
         return pos, quat_mul(quat0, _exp(self.offset_ori).expand_as(quat0))
 
     def tracking_errors(self) -> dict[str, torch.Tensor]:
-        """The errors of this step, eq. 15 and 16, and a sample of it for the offsets."""
+        """Return the tracking errors of this step, eq. 15 and 16.
+
+        The rewards and the terminations share one computation per step. If the offsets
+        learn, the step also goes into their samples.
+        """
         if self._errors_at == self._env.common_step_counter:
             return self.errors
         self._errors_at = self._env.common_step_counter
@@ -421,7 +443,7 @@ class GoalCommand(CommandTerm):
             "root_angle": angle[:, 0],
         }
         if self.cfg.learn:
-            slot = self.steps % self.cfg.steps_per_iteration
+            slot = self.steps % STEPS_PER_ITERATION
             self.sample_index[slot] = index
             self.sample_pos[slot] = sim_pos
             self.sample_quat[slot] = sim_quat
@@ -430,13 +452,13 @@ class GoalCommand(CommandTerm):
         return self.errors
 
     def learn_offsets(self) -> None:
-        """One step of the upper level, eq. 3, 6, 7: move the goals toward the simulation."""
+        """Take one step of the upper level, eq. 3, 6 and 7: move the goals toward the simulated links."""
         # The runner steps the env in inference mode, which turns autograd off.
         with torch.inference_mode(False), torch.enable_grad():
             valid = self.sample_valid
             goal_pos, goal_quat = self.goals(self.sample_index[valid])
-            # sin^2 of half the angle, times 4, is the squared angle for small angles, and has
-            # a gradient at zero, where the angle does not.
+            # 4 sin^2 of half the angle is about the squared angle for small angles. Unlike the
+            # angle, it has a gradient at zero.
             dot = (goal_quat * self.sample_quat[valid]).sum(-1)
             loss = (
                 GOAL_POSITION_WEIGHT * (goal_pos - self.sample_pos[valid]).square().sum(-1)
@@ -472,7 +494,9 @@ class GoalCommand(CommandTerm):
         if self.cfg.playback:
             motion, frame = env_ids % len(self.starts), self.playback_start[env_ids]
         else:
-            # Each motion is drawn by how often it failed, with a floor for the others.
+            # Draw a motion in proportion to how often it failed. A tenth of the draws are
+            # uniform, so every motion still plays. The resets before the first step end no
+            # motion.
             if self.steps > 0:
                 ended = self.motion[env_ids]
                 self.trials.index_add_(0, ended, torch.ones_like(ended, dtype=torch.float))
@@ -497,7 +521,7 @@ class GoalCommand(CommandTerm):
         if env_ids is None:
             self.frame += 1
             self.steps += 1
-            if self.cfg.learn and self.steps % self.cfg.steps_per_iteration == 0:
+            if self.cfg.learn and self.steps % STEPS_PER_ITERATION == 0:
                 self.iteration += 1
                 if self.iteration > self.cfg.warmstart:
                     self.learn_offsets()
@@ -509,7 +533,7 @@ class GoalCommand(CommandTerm):
 
 
 def _exp(rotvec: torch.Tensor) -> torch.Tensor:
-    """wxyz quaternions of rotation vectors ``(..., 3)``, with a gradient at zero."""
+    """Return the wxyz quaternions of rotation vectors ``(..., 3)``, with a gradient at zero."""
     angle = (rotvec.square().sum(-1, keepdim=True) + 1e-12).sqrt()
     return torch.cat([torch.cos(0.5 * angle), rotvec * torch.sin(0.5 * angle) / angle], dim=-1)
 
@@ -531,6 +555,7 @@ class ResidualJointAction(JointPositionAction):
     cfg: ResidualJointActionCfg
 
     def process_actions(self, actions: torch.Tensor) -> None:
+        # The base class adds ``_offset`` to the scaled action.
         command = self._env.command_manager.get_term(self.cfg.command_name)
         self._offset = command.reference_joint_pos[:, self._target_ids]
         super().process_actions(actions)
@@ -613,14 +638,17 @@ def motion_end(env: ManagerBasedRlEnv) -> torch.Tensor:
 
 
 def lost_track(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """The root is 0.5 m or 1 rad from its goal, or the simulation diverged: the motion failed."""
+    """Return which envs lost track of their motion.
+
+    An env lost track if its root is 0.5 m or 1 rad from its goal, or if its simulation diverged.
+    """
     errors = env.command_manager.get_term("goals").tracking_errors()
     distance, angle = errors["root_distance"], errors["root_angle"]
     return (distance > 0.5) | (angle > 1.0) | ~torch.isfinite(distance) | ~torch.isfinite(angle)
 
 
 def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> ManagerBasedRlEnvCfg:
-    """The environment. The terms follow table 1 of the paper, in its weights."""
+    """Return the environment. Its terms and their weights follow table 1 of the paper."""
     observations = {
         "goals": ObservationTermCfg(func=goal_features),
         "joint_target_error": ObservationTermCfg(func=joint_target_error),
@@ -632,6 +660,8 @@ def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> Ma
         "joint_vel": ObservationTermCfg(func=joint_vel_rel),
         "actions": ObservationTermCfg(func=last_action),
     }
+    # A unit action moves the target of a joint by a quarter of its effort limit over its stiffness.
+    scale = {joint: 0.25 * effort / stiffness for joint, (stiffness, _, effort) in pd_gains(joints).items()}
     error = lambda key, weight: RewardTermCfg(func=tracking_error, weight=weight, params={"key": key})  # noqa: E731
     return ManagerBasedRlEnvCfg(
         scene=SceneCfg(
@@ -645,7 +675,7 @@ def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> Ma
         },
         actions={
             "joint_pos": ResidualJointActionCfg(
-                entity_name="robot", actuator_names=(".*",), scale=action_scales(joints), use_default_offset=False,
+                entity_name="robot", actuator_names=(".*",), scale=scale, use_default_offset=False,
             ),
             "wrench": RootWrenchActionCfg(entity_name="robot"),
         },
@@ -667,11 +697,13 @@ def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> Ma
             "wrench_force": RewardTermCfg(func=wrench_l1, weight=-1e-2, params={"part": "force"}),
             "wrench_torque": RewardTermCfg(func=wrench_l1, weight=-1e-2, params={"part": "torque"}),
         },
+        # In playback, export decides when an env resets.
         terminations={} if goals.playback else {
             "time_out": TerminationTermCfg(func=time_out, time_out=True),
             "motion_end": TerminationTermCfg(func=motion_end, time_out=True),
             "lost_track": TerminationTermCfg(func=lost_track),
         },
+        # One env step must take one frame, 1 / FPS: four physics steps of 5 ms.
         sim=SimulationCfg(nconmax=128, njmax=512, mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20)),
         decimation=4,
         episode_length_s=1.0e6 if goals.playback else 10.0,
@@ -680,9 +712,9 @@ def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> Ma
 
 
 def agent_cfg(iterations: int, run_name: str) -> RslRlOnPolicyRunnerCfg:
-    """PPO of table 2 of the paper."""
+    """Return the PPO config of table 2 of the paper."""
     return RslRlOnPolicyRunnerCfg(
-        num_steps_per_env=24,
+        num_steps_per_env=STEPS_PER_ITERATION,
         max_iterations=iterations,
         save_interval=500,
         experiment_name="reactor",
@@ -715,13 +747,13 @@ def train(
     """Train the policy and the goal offsets on the motions of ``source`` in ``store``.
 
     Args:
-        source: A key of ``sources.SOURCES``, whose motions ``retarget.py`` wrote to ``store``.
-        clip: A regex on the path of a clip, as ``retarget.py`` takes it.
+        source: A key of ``sources.SOURCES``. ``retarget.py`` must first write its motions to ``store``.
+        clip: A regex on the path of a clip, as in ``retarget.py``.
         store: The store to read the motions from.
-        num_envs: Parallel simulations.
-        iterations: PPO iterations.
-        warmstart: PPO iterations before the goal offsets learn.
-        run_name: Appended to the name of the run directory.
+        num_envs: The number of parallel simulations.
+        iterations: The number of PPO iterations.
+        warmstart: The number of PPO iterations before the goal offsets start to learn.
+        run_name: A suffix for the name of the run directory.
     """
     paths = motion_paths(source, clip, store)
     run = LOG_ROOT / (datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + (f"_{run_name}" if run_name else ""))
@@ -731,30 +763,30 @@ def train(
     print(f"{len(paths)} motions, {len(joints)} joints actuated -> {run}")
 
     goals = GoalCommandCfg(library=str(library), warmstart=warmstart, save_to=str(run / "goals.pt"))
-    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals), device="cuda:0")
-    agent = agent_cfg(iterations, run_name)
-    runner = MjlabOnPolicyRunner(RslRlVecEnvWrapper(env), asdict(agent), str(run), "cuda:0")
+    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals), device=DEVICE)
+    runner = MjlabOnPolicyRunner(RslRlVecEnvWrapper(env), asdict(agent_cfg(iterations, run_name)), str(run), DEVICE)
     runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True)
     env.command_manager.get_term("goals").save(run / "goals.pt")
     env.close()
 
 
 def export(run: Path, out: Path, checkpoint: str | None = None) -> None:
-    """Play every motion of a run with its policy and goals, and write the result to ``out``.
+    """Play each motion of a run with its policy and goals, and write the result to ``out``.
 
-    Each motion starts at the IK solution of its first frame and plays to its end. Where
-    its root gets 0.5 m or 1 rad from its goal, it lost track: the piece before ends
-    :data:`CUT_SECONDS` earlier, and play starts again from the IK solution of that frame.
-    A motion that never lost track is written under its name. Otherwise each piece of at
-    least :data:`PIECE_SECONDS` is, as ``<name>_f<first frame>``. The metrics of
-    ``retarget.motion_metrics`` measure each against the learned goals, and four more
-    measure the wrench: ``wrench_force_max``, ``wrench_force_mean``, ``wrench_torque_max``
-    and ``wrench_torque_mean``, in N and N m. A high peak with a low mean is a short push.
+    Each motion starts at the IK solution of its first frame and plays to its end. If the
+    root gets 0.5 m or 1 rad from its goal, play lost track at that frame. Play starts again
+    from the IK solution of that frame, and the piece before it ends :data:`CUT_SECONDS`
+    earlier. Export writes each piece of at least :data:`PIECE_SECONDS`. A motion that never
+    lost track is one piece and keeps its name. Other pieces get the name
+    ``<name>_f<first frame>``. The metrics of ``retarget.motion_metrics`` compare each piece
+    with the learned goals. Four more metrics measure the wrench, in N and N m:
+    ``wrench_force_max``, ``wrench_force_mean``, ``wrench_torque_max`` and
+    ``wrench_torque_mean``. A high peak with a low mean is a short push.
 
     Args:
         run: The run directory that ``train`` wrote.
         out: The store to write.
-        checkpoint: A ``model_<n>.pt`` of the run. The last one by default.
+        checkpoint: A ``model_<n>.pt`` of the run. The default is the last one.
     """
     library_path = run / "library.npz"
     library = np.load(library_path)
@@ -762,17 +794,17 @@ def export(run: Path, out: Path, checkpoint: str | None = None) -> None:
     model_path = run / checkpoint if checkpoint else max(run.glob("model_*.pt"), key=lambda p: int(p.stem[6:]))
 
     goals = GoalCommandCfg(library=str(library_path), learn=False, offsets=str(run / "goals.pt"), playback=True)
-    env = ManagerBasedRlEnv(cfg=env_cfg(joints, len(names), goals), device="cuda:0")
+    env = ManagerBasedRlEnv(cfg=env_cfg(joints, len(names), goals), device=DEVICE)
     wrapped = RslRlVecEnvWrapper(env)
-    runner = MjlabOnPolicyRunner(wrapped, asdict(agent_cfg(0, "")), None, "cuda:0")
-    runner.load(str(model_path), map_location="cuda:0")
-    policy = runner.get_inference_policy(device="cuda:0")
+    runner = MjlabOnPolicyRunner(wrapped, asdict(agent_cfg(0, "")), None, DEVICE)
+    runner.load(str(model_path), map_location=DEVICE)
+    policy = runner.get_inference_policy(device=DEVICE)
 
     command = env.command_manager.get_term("goals")
     robot, wrench = command.robot, env.action_manager.get_term("wrench")
     frames = int(lengths.max())
-    base_pos = np.zeros((frames, len(names), 3), dtype=np.float32)
-    base_quat = np.zeros((frames, len(names), 4), dtype=np.float32)
+    root_pos = np.zeros((frames, len(names), 3), dtype=np.float32)
+    root_quat = np.zeros((frames, len(names), 4), dtype=np.float32)
     joint_pos = np.zeros((frames, len(names), len(joints)), dtype=np.float32)
     force = np.zeros((frames, len(names)), dtype=np.float32)
     torque = np.zeros((frames, len(names)), dtype=np.float32)
@@ -786,15 +818,14 @@ def export(run: Path, out: Path, checkpoint: str | None = None) -> None:
             if t > 0:
                 obs, _, _, _ = wrapped.step(policy(obs))
                 lost = np.flatnonzero(lost_track(env).cpu().numpy() & (t < lengths))
-                for i in lost:
-                    pieces.append((i, first[i], t - round(CUT_SECONDS * FPS)))
-                    first[i] = t
                 if len(lost):
+                    pieces += [(i, first[i], t - round(CUT_SECONDS * FPS)) for i in lost]
+                    first[lost] = t
                     command.playback_start[lost] = t
                     env.reset(env_ids=torch.as_tensor(lost, device=command.device))
                     obs = wrapped.get_observations()
-            base_pos[t] = (robot.data.root_link_pos_w - env.scene.env_origins).cpu().numpy()
-            base_quat[t] = robot.data.root_link_quat_w.cpu().numpy()
+            root_pos[t] = (robot.data.root_link_pos_w - env.scene.env_origins).cpu().numpy()
+            root_quat[t] = robot.data.root_link_quat_w.cpu().numpy()
             joint_pos[t] = robot.data.joint_pos.cpu().numpy()
             force[t] = wrench.force.norm(dim=-1).cpu().numpy()
             torque[t] = wrench.torque.norm(dim=-1).cpu().numpy()
@@ -816,51 +847,36 @@ def export(run: Path, out: Path, checkpoint: str | None = None) -> None:
             continue
         whole = begin == 0 and stop == lengths[i]
         name = names[i] if whole else f"{names[i]}_f{begin:05d}"
-        frame = slice(begin, stop)
+        played = slice(begin, stop)
         span = slice(int(library["starts"][i]) + begin, int(library["starts"][i]) + stop)
         full = np.zeros((stop - begin, len(models.joint_names)), dtype=np.float32)
-        full[:, columns] = joint_pos[frame, i]
+        full[:, columns] = joint_pos[played, i]
+        # In a robot layer, the goal of the root link places the robot, so it takes the simulated root pose.
         pos, quat = goal_pos[span].copy(), goal_quat[span].copy()
-        pos[:, 0], quat[:, 0] = base_pos[frame, i], base_quat[frame, i]
+        pos[:, 0], quat[:, 0] = root_pos[played, i], root_quat[played, i]
         metrics = motion_metrics(
-            models, base_pos[frame, i], base_quat[frame, i], full, bodies, pos, quat,
+            models, root_pos[played, i], root_quat[played, i], full, bodies, pos, quat,
             planted(goal_pos[span][:, feet, None], FPS),
         )
         metrics |= {
-            "wrench_force_max": float(force[frame, i].max()),
-            "wrench_force_mean": float(force[frame, i].mean()),
-            "wrench_torque_max": float(torque[frame, i].max()),
-            "wrench_torque_mean": float(torque[frame, i].mean()),
+            "wrench_force_max": float(force[played, i].max()),
+            "wrench_force_mean": float(force[played, i].mean()),
+            "wrench_torque_max": float(torque[played, i].max()),
+            "wrench_torque_mean": float(torque[played, i].mean()),
         }
         write_robot_layer(
             out, name, urdf, FPS, models.joint_names, full, bodies, sources, pos, quat, False, metrics,
             tuple(library["active"][i].split(",")),
         )
-        # The source layer holds the whole clip, so only a whole motion takes it.
+        # The base layer holds the whole clip, so only a whole motion takes it.
         base = Path(str(library["store"])) / BASE_LAYER / f"{name}.rrd"
         if whole and base.exists():
             (out / BASE_LAYER).mkdir(parents=True, exist_ok=True)
             shutil.copy(base, out / BASE_LAYER / f"{name}.rrd")
         kept += stop - begin
         print(f"{name}: " + ", ".join(f"{key} {value:.2f}" for key, value in metrics.items()))
-    lost_count = len(pieces) - len(names)
     print(f"\nKept {kept / lengths.sum():.0%} of {lengths.sum() / FPS / 60:.1f} min of motion in {out}. "
-          f"Play lost track {lost_count} times.")
-
-
-def motion_paths(source: str, clip: str | None, store: Path) -> list[Path]:
-    """The robot layers in ``store`` of the clips of ``source`` that match ``clip``."""
-    spec = SOURCES[source]
-    clip_dir = CACHE_ROOT / source / spec.clip_dir
-    paths = [
-        store / ROBOT / f"{motion_name(source, clip_dir, path)}.rrd"
-        for path in sorted(clip_dir.glob(spec.clip_glob))
-        if clip is None or re.search(clip, clip_key(clip_dir, path))
-    ]
-    missing = [path for path in paths if not path.exists()]
-    if missing or not paths:
-        raise SystemExit(f"{len(missing)} of {len(paths)} motions are not in {store}. Run scripts/retarget.py.")
-    return paths
+          f"Play lost track {len(pieces) - len(names)} times.")
 
 
 if __name__ == "__main__":

@@ -18,12 +18,12 @@ viewer: false
 
 # Lite LAFAN1 Dataset
 
-40 [LAFAN1][lafan1] clips at 50 Hz, retargeted from the Unitree G1 to the Berkeley Lite
-Pro humanoid by [Lite-Motion-Retargeting][retarget], with the 30 Hz source kept beside
-them. One motion is one
-[Rerun](https://rerun.io) recording. [Open one in your browser][viewer], with no
+This dataset holds 40 [LAFAN1][lafan1] motions at 50 Hz.
+[Lite-Motion-Retargeting][retarget] retargeted them from the Unitree G1 to the Berkeley
+Lite Pro humanoid, and kept the 30 Hz source clip beside each motion. Each motion is one
+[Rerun](https://rerun.io) recording. You can [open one in your browser][viewer], with no
 install. The [table below](#motions) links every motion, and the
-[Lite Motion Dataset][browser] Space plays them all on one page.
+[Lite Motion Dataset][browser] Space plays all of them on one page.
 
 ```bash
 hf download Berkeley-Humanoids/Lite-LAFAN1-Dataset --repo-type dataset \
@@ -32,36 +32,39 @@ hf download Berkeley-Humanoids/Lite-LAFAN1-Dataset --repo-type dataset \
 rerun */lafan1_dance1_subject1.rrd blueprints/lite_pro.rbl
 ```
 
-Pass the blueprint last. Blueprints do not merge, and the last one loaded wins.
+Pass the blueprint last. Blueprints do not merge, and the viewer uses the last one that it
+loads.
 
 ## Layout
 
-A directory is a [layer](https://rerun.io/blog/data-layer-for-robot-learning) and a file
-is a motion, after [`rerun/arkitscenes-rrd`](https://huggingface.co/datasets/rerun/arkitscenes-rrd).
-All layers of one motion share an `application_id` and a `recording_id`, so the viewer
-opens any set of them as one recording.
+Each directory is a [layer](https://rerun.io/blog/data-layer-for-robot-learning), and each
+file is a motion. This layout follows
+[`rerun/arkitscenes-rrd`](https://huggingface.co/datasets/rerun/arkitscenes-rrd). All
+layers of one motion share an `application_id` and a `recording_id`, so the viewer opens
+any set of them as one recording.
 
 | Path | What it holds |
 |---|---|
-| `base/<motion>.rrd` | The source clip as published, at 30 Hz: the 29 G1 joints, and the world poses they put its bodies at. Provenance, so a motion can be derived again without the upstream dataset. |
-| `lite_pro/<motion>.rrd` | Everything the robot needs, at 50 Hz: the retargeted joints, the goal its bodies track, and the URDF geometry that draws it. |
+| `base/<motion>.rrd` | The source clip as published, at 30 Hz: the 29 G1 joints, and the world poses that these joints put the G1 bodies at. It records provenance, so you can derive the motion again without the upstream dataset. |
+| `lite_pro/<motion>.rrd` | Everything the robot needs, at 50 Hz: the retargeted joints, the goal that its bodies track, and the URDF geometry that draws it. |
 | `blueprints/lite_pro.rbl` | The viewer layout. |
-| `web/` | The robot layer as the [browser][browser] plays it: `index.json.gz` lists the motions, `robot.json` and `robot.bin` draw the robot, and each pack under `packs/` holds float32 rows of motions end to end. `scripts/build_site.py` documents the format. |
+| `web/` | The robot layer in the form that the [motion browser][browser] plays: `index.json.gz` lists the motions, `robot.json` and `robot.bin` draw the robot, and each pack under `packs/` holds float32 rows of motions end to end. `scripts/build_site.py` documents the format. |
 
-The robot layer is self-contained. Its joints reset the robot, and `/lite_pro/goal/`
-holds what the robot tracks, in the frame convention of the Lite links, so a reward
-compares it against the robot directly. `source_body_names` records which G1 link each
-goal came from. The layer stores no reached pose, because that is the forward kinematics
-of the joints beside it, and the `/lite_pro/tf` chain already draws the robot there. The
-gap between the robot and its goal triads is the error of the retarget, frame by frame.
+The robot layer is self-contained, and its joints reset the robot. `/lite_pro/goal/` holds
+the goal that the robot tracks, in the frame convention of the Lite links, so a reward
+compares the goal with the robot directly. `source_body_names` records the G1 link that
+each goal came from. The layer stores no reached pose, because the reached pose is the
+forward kinematics of the joints beside it. The `/lite_pro/tf` chain already draws the
+robot at that pose. The gap between the robot and its goal triads is the retargeting
+error, frame by frame.
 
 Both layers carry the pelvis, both feet, and both hands: `/lite_pro/goal/` under the Lite
-link names, and `/base/body/` under the G1 ones.
+link names, and `/base/body/` under the G1 link names.
 
-Every array is world frame, in metres and radians, and a rotation is `xyzw`. A velocity
-is the backward difference against the frame before it, so frame 0 holds zero. Every
-column carries a `frame` index and a `time` in seconds. The two layers run at different
-rates, so `time` is what lines them up. `scripts/store.py` of
+Every array is in the world frame, in meters and radians, and each rotation is `xyzw`.
+Each velocity is the backward difference from the frame before, so frame 0 holds zero.
+Every column carries a `frame` index and a `time` in seconds. The two layers run at
+different rates, so `time` lines them up. `scripts/store.py` of
 [Lite-Motion-Retargeting][retarget] lists every entity path and property.
 
 ## Motions
@@ -70,10 +73,11 @@ rates, so `time` is what lines them up. `scripts/store.py` of
 
 ## Source
 
-The G1 subset of [`lvhaidong/LAFAN1_Retargeting_Dataset`][lafan1] is LAFAN1 already
-retargeted to a 29-DoF Unitree G1, at 30 Hz. [Lite-Motion-Retargeting][retarget]
-resamples it to 50 Hz and takes it to Lite Pro with a per-joint remap, a per-frame IK, and
-a per-clip shift that puts the soles on the floor, and documents all three. The result depends on the Lite Pro asset, so a new version of
+The G1 subset of [`lvhaidong/LAFAN1_Retargeting_Dataset`][lafan1] is LAFAN1, already
+retargeted to a 29-DoF Unitree G1, at 30 Hz. [Lite-Motion-Retargeting][retarget] resamples
+it to 50 Hz and retargets it to Lite Pro in three steps: a per-joint remap, a per-frame
+IK, and a per-clip shift that puts the soles on the floor. Lite-Motion-Retargeting
+documents all three steps. The result depends on the Lite Pro model, so a new version of
 [Lite-Description](https://github.com/Berkeley-Humanoids/Lite-Description) gives new
 motions.
 

@@ -16,12 +16,12 @@ hf_oauth_scopes:
 
 # Lite Motion Dataset
 
-The motion browser of [Lite-Motion-Retargeting][retarget]: human motion retargeted from
-the Unitree G1 to the Berkeley Lite Pro, played in your browser.
+This Space is the motion browser of [Lite-Motion-Retargeting][retarget]. It plays human
+motion, retargeted from the Unitree G1 to the Berkeley Lite Pro, in your browser.
 
-The page is static. `collections.json` lists the dataset folders it shows, and the page
-reads each motion straight from the Hub, as a byte range of a pack. Sign in with Hugging
-Face to also see the private collections your account can read.
+The page is static. `collections.json` lists the dataset folders, or collections, that the
+page shows. The page reads each motion directly from the Hub, as a byte range of a pack.
+To also see the private collections that your account can read, sign in with Hugging Face.
 
 `scripts/publish.py` of [Lite-Motion-Retargeting][retarget] writes this Space. Change the
 files there, not here.

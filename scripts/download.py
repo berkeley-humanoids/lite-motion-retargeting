@@ -1,9 +1,9 @@
-"""Download a motion source, and the G1 model the G1 sources were retargeted to.
+"""Download a motion source, and the G1 model that the G1 sources use.
 
-The G1 URDF and its meshes go to ``.cache/g1/``, because every G1 source shares them. The
-clips go to ``.cache/<source>/``: from the Hub, or from the zip of a source that is not on
-the Hub. ``--include`` takes Hub glob patterns in place of the default ones of the source,
-to fetch part of a large set.
+The script puts the G1 URDF and its meshes in ``.cache/g1/``, because every G1 source
+shares them. It puts the clips in ``.cache/<source>/``, from the Hub, or from the zip of a
+source that is not on the Hub. To download only part of a large set from the Hub, give Hub
+glob patterns with ``--include``. They replace the default patterns of the source.
 
 Usage:
     uv run scripts/download.py
@@ -27,8 +27,9 @@ from common import CACHE_ROOT, G1_REPO_ID, G1_URDF_PATH  # noqa: E402
 from human import HumanClip  # noqa: E402
 from sources import SOURCES  # noqa: E402
 
-#: Files fetched at once. AMASS and MotionDecode are tens of thousands of small files, so
-#: the time per request, not the bandwidth, sets how long a download takes.
+#: The number of files that download in parallel. AMASS and MotionDecode have tens of
+#: thousands of small files, so the time per request, not the bandwidth, sets the download
+#: time.
 DOWNLOAD_WORKERS: int = 32
 
 
@@ -36,9 +37,9 @@ def main(source: str = "lafan1", include: list[str] | None = None, force: bool =
     """Download ``source`` into ``.cache/<source>/``, and the G1 model into ``.cache/g1/``.
 
     Args:
-        source: One of the keys of ``sources.SOURCES``.
-        include: Hub glob patterns to download in place of the default ones of the source.
-        force: Re-download even if files already exist.
+        source: A key of ``sources.SOURCES``.
+        include: Hub glob patterns to download instead of the default patterns of the source.
+        force: Download the files again, even if they exist.
     """
     if source not in SOURCES:
         raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")

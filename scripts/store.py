@@ -4,11 +4,12 @@ A layer is a stage of the pipeline, a directory, and one file per motion:
 
     base/        <motion>.rrd   the source clip as published, at its own rate
     <robot>/     <motion>.rrd   everything the robot needs, at the control rate
+    assets/      <robot>.rrd    the geometry of that robot, once for every motion
     blueprints/  <robot>.rbl    the viewer layout for that robot
 
 ``base/`` is provenance. Nothing downstream reads it, and a motion is complete without
-it. ``<robot>/`` is self-contained: its joints reset the robot, its body poses are the
-goal the robot tracks, and its geometry draws it.
+it. ``<robot>/`` is what training reads: its joints reset the robot, and its body poses
+are the goal the robot tracks.
 
 A robot layer stores the **goal**, not the pose the solve reached, and says so in the
 path: ``/<robot>/goal/`` and not ``/<robot>/body/``. The reached pose is the forward
@@ -45,8 +46,14 @@ Every entity drawn in 3D must name a frame. One that names none is an orphan: th
 invents a frame for it, finds no route to the root of the view, and draws an error in its
 place. Scalars are exempt, because the viewer plots them against time.
 
-Each motion carries its own copy of the robot's geometry. A shared file would need a
-different recording id, which the viewer would not compose against the motion.
+The geometry of a robot is 9 MB, more than most motions, so ``assets/<robot>.rrd`` holds
+it once, as static data under a recording id of its own. ``rerun --asset`` (Rerun 0.38.1
+and later) attaches it to every motion the viewer opens:
+
+    rerun <root>/*/<motion>.rrd --asset <root>/assets/<robot>.rrd <root>/blueprints/<robot>.rbl
+
+Only the native viewer loads assets. A motion that the web viewer must draw on its own,
+such as one the Hub card links to, carries its own copy of the geometry instead.
 
 Rerun stores a rotation as xyzw. MuJoCo, and every array this module takes, uses wxyz.
 """
@@ -117,13 +124,15 @@ def write_robot_layer(
     source_body_names: tuple[str, ...],
     body_pos: np.ndarray,
     body_quat: np.ndarray,
+    geometry: bool,
 ) -> Path:
     """Write ``<robot>/<name>.rrd``: everything one robot needs for one motion.
 
-    The layer holds the joints the solve reached, the world pose ``body_names`` is meant
-    to reach, and the robot's geometry, so the file animates the robot on its own.
-    Everything sits under ``/<robot>/``, the URDF's frames and static transforms
-    included, so a second robot can open beside it.
+    The layer holds the joints the solve reached and the world pose ``body_names`` is
+    meant to reach. With ``geometry``, it also holds the robot's geometry and the URDF's
+    static transforms, so the file animates the robot on its own. Without it, the
+    viewer takes them from the asset that :func:`write_asset` writes. Everything sits
+    under ``/<robot>/``, so a second robot can open beside it.
 
     ``body_pos`` and ``body_quat`` are the **goal**, in this robot's frame convention,
     which is what a tracking reward compares against, and they go under ``/<robot>/goal/``
@@ -156,7 +165,8 @@ def write_robot_layer(
             body_names=list(body_names),
             source_body_names=list(source_body_names),
         ))
-        tree.log_urdf_to_recording(recording=stream)
+        if geometry:
+            tree.log_urdf_to_recording(recording=stream)
         _send_joints(stream, robot, fps, joint_names, joint_pos)
         _send_bodies(stream, f"{robot}/goal", fps, body_names, body_pos, body_quat)
 
@@ -184,6 +194,27 @@ def write_robot_layer(
                 parent_frame=[WORLD_FRAME] * frames,
             ),
         )
+    return path
+
+
+def write_asset(root: Path, urdf_path: Path) -> Path:
+    """Write ``assets/<robot>.rrd``: the URDF's geometry and static transforms.
+
+    An asset may hold static data only, and this one holds nothing else. Its recording
+    id is its own, because the viewer attaches an asset to every motion of the dataset,
+    whatever their ids.
+    """
+    robot = _robot_name(urdf_path)
+    tree = rr.urdf.UrdfTree.from_file_path(
+        urdf_path,
+        frame_prefix=f"{robot}/",
+        static_transform_entity_path=f"{robot}/tf_static",
+    )
+    path = root / "assets" / f"{robot}.rrd"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rr.RecordingStream(APPLICATION_ID, recording_id=f"{robot}_geometry") as stream:
+        stream.save(str(path))
+        tree.log_urdf_to_recording(recording=stream)
     return path
 
 

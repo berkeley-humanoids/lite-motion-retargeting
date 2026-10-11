@@ -22,7 +22,8 @@ viewer: false
 Pro humanoid by [Lite-Motion-Retargeting][retarget], with the 30 Hz source kept beside
 them. One motion is one
 [Rerun](https://rerun.io) recording. [Open one in your browser][viewer], with no
-install. The [table below](#motions) links every motion.
+install. The [table below](#motions) links every motion, and the
+[Lite Motion Dataset][browser] Space plays them all on one page.
 
 ```bash
 hf download Berkeley-Humanoids/Lite-LAFAN1-Dataset --repo-type dataset \
@@ -45,6 +46,7 @@ opens any set of them as one recording.
 | `base/<motion>.rrd` | The source clip as published, at 30 Hz: the 29 G1 joints, and the world poses they put its bodies at. Provenance, so a motion can be derived again without the upstream dataset. |
 | `lite_pro/<motion>.rrd` | Everything the robot needs, at 50 Hz: the retargeted joints, the goal its bodies track, and the URDF geometry that draws it. |
 | `blueprints/lite_pro.rbl` | The viewer layout. |
+| `web/` | The robot layer as the [browser][browser] plays it: `index.json.gz` lists the motions, `robot.json` and `robot.bin` draw the robot, and each pack under `packs/` holds float32 rows of motions end to end. `scripts/build_site.py` documents the format. |
 
 The robot layer is self-contained. Its joints reset the robot, and `/lite_pro/goal/`
 holds what the robot tracks, in the frame convention of the Lite links, so a reward
@@ -70,8 +72,8 @@ rates, so `time` is what lines them up. `scripts/store.py` of
 
 The G1 subset of [`lvhaidong/LAFAN1_Retargeting_Dataset`][lafan1] is LAFAN1 already
 retargeted to a 29-DoF Unitree G1, at 30 Hz. [Lite-Motion-Retargeting][retarget]
-resamples it to 50 Hz and takes it to Lite Pro with a per-joint remap and a per-frame IK,
-and documents both. The result depends on the Lite Pro asset, so a new version of
+resamples it to 50 Hz and takes it to Lite Pro with a per-joint remap, a per-frame IK, and
+a per-clip shift that puts the soles on the floor, and documents all three. The result depends on the Lite Pro asset, so a new version of
 [Lite-Description](https://github.com/Berkeley-Humanoids/Lite-Description) gives new
 motions.
 
@@ -79,4 +81,5 @@ CC BY-NC 4.0, inherited from LAFAN1. Non-commercial use only.
 
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
 [retarget]: https://github.com/Berkeley-Humanoids/Lite-Motion-Retargeting
+[browser]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motion-Dataset
 [viewer]: https://rerun.io/viewer?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2FBerkeley-Humanoids%2FLite-LAFAN1-Dataset%2Fresolve%2Fmain%2Flite_pro%2Flafan1_dance1_subject1.rrd

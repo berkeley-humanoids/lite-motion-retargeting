@@ -1,7 +1,7 @@
 """Serve the motion browser in ``site/`` on this machine.
 
-The page reads each motion as a byte range of a pack, and ``python -m http.server``
-answers a range request with the whole file. This server answers it with the range.
+The page reads each motion as a byte range of a pack. ``python -m http.server`` answers
+a range request with the whole file, but this server answers it with the range.
 
 Usage:
     uv run scripts/serve.py              # then open http://localhost:8000
@@ -24,7 +24,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
     """A static file handler that also answers ``Range: bytes=<start>-<end>``."""
 
     def send_head(self) -> io.BufferedIOBase | None:
-        """Send the headers of a request, and return the body to copy after them."""
+        """Send the response headers, and return the body to copy after them."""
         match = re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
         path = self.translate_path(self.path)
         if match is None or not os.path.isfile(path):
@@ -35,7 +35,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         if start >= stop:
             self.send_error(416, "Range Not Satisfiable")
             return None
-        # A range is one motion, a few hundred kB, so it is read whole.
+        # A range is one motion of a few hundred kB, so one read gets all of it.
         with open(path, "rb") as file:
             file.seek(start)
             body = file.read(stop - start)
@@ -48,10 +48,10 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
 
 
 def main(port: int = 8000) -> None:
-    """Serve ``site/`` until interrupted.
+    """Serve ``site/`` until you stop the server with Ctrl+C.
 
     Args:
-        port: The port to listen on, on every interface.
+        port: The port to listen on. The server listens on all interfaces.
     """
     server = ThreadingHTTPServer(("", port), partial(RangeRequestHandler, directory=str(SITE_ROOT)))
     print(f"Serving {SITE_ROOT} at http://localhost:{port}")

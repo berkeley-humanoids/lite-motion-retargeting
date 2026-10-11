@@ -24,7 +24,7 @@
 <header class="masthead">
   <div class="brand">
     <h1>Lite Motion Library</h1>
-    <p>Human motion retargeted to the Berkeley Lite Pro, from the original capture or through the Unitree G1. Point at a motion to play it, and open it to inspect it frame by frame.</p>
+    <p>Human motion retargeted to the Berkeley Lite Pro, from the original capture or through the Unitree G1. Point at a motion to play it. Open a motion to examine it frame by frame.</p>
   </div>
   <div class="search">
     <label for="search" class="visually-hidden">Search motions</label>
@@ -37,15 +37,15 @@
   <aside class="filters" aria-label="Filters">
     <section>
       <h2>Source</h2>
-      <div id="sources" class="source-list"></div>
+      <div id="sources" class="filter-list"></div>
     </section>
     <section>
       <h2>Drives</h2>
-      <div id="drives" class="source-list"></div>
+      <div id="drives" class="filter-list"></div>
     </section>
     <section>
       <h2>Category</h2>
-      <div id="categories" class="category-list"></div>
+      <div id="categories" class="filter-list"></div>
     </section>
   </aside>
 
@@ -75,7 +75,7 @@
 
 <div id="viewer" class="viewer" role="dialog" aria-modal="true" aria-labelledby="viewer-name" hidden>
   <div class="viewer-stage">
-    <canvas id="viewer-canvas" aria-label="The motion, played by the character or the robot. Drag to orbit, scroll to zoom."></canvas>
+    <canvas id="viewer-canvas" aria-label="The motion, played by the character or the robot. Drag to orbit. Scroll to zoom."></canvas>
     <p id="viewer-loading" class="viewer-loading" hidden>Loading motion</p>
     <div class="controls">
       <button id="play" class="play" type="button" aria-label="Pause">
@@ -110,7 +110,7 @@
     <dl id="viewer-stats" class="stats"></dl>
     <div class="actions">
       <a id="open-rerun" class="button primary" target="_blank" rel="noopener" hidden>Open in the Rerun web viewer</a>
-      <p class="command-label">Open the layers in Rerun, from the repository:</p>
+      <p class="command-label">To open the layers in Rerun, run this command in the repository:</p>
       <div class="command">
         <code id="command"></code>
         <button id="copy" type="button">Copy</button>

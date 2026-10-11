@@ -1,13 +1,13 @@
-"""The motion sets this pipeline reads: human motion, or motion already on the Unitree G1.
+"""The motion sets that this pipeline reads: human motion, or motion already on the Unitree G1.
 
 A human source, such as the LAFAN1 BVH takes, has a loader that returns a
 :class:`human.HumanClip`: the bodies of one shared human skeleton, which ``human.py``
-defines. A new human format needs a reader into that skeleton and nothing else.
+defines. A new human format needs only a reader into that skeleton.
 
-A G1 source was retargeted to the 29-DoF G1 by its authors. Every one stores the same 36
-numbers per frame: the base position, the base rotation, and the joints in the order of
-:data:`common.G1_JOINT_NAMES`. They differ only in file format, quaternion order, and
-rate, and a loader reads one clip and returns it at its own rate:
+The authors of a G1 source retargeted it to the 29-DoF G1. Every G1 source stores the same
+36 numbers per frame: the base position, the base rotation, and the joints in the order of
+:data:`common.G1_JOINT_NAMES`. The sources differ only in file format, quaternion order,
+and rate. A loader reads one clip and returns it at its own rate:
 
     base_pos        (T, 3)   world, metres
     base_quat_wxyz  (T, 4)   world, wxyz, w >= 0
@@ -16,8 +16,8 @@ rate, and a loader reads one clip and returns it at its own rate:
 A source that does not ship one file per clip, such as Kimodo with its LeRobot shards,
 unpacks itself after download into one file per clip in that layout.
 
-The height of the base is the convention of each source, and AMASS puts the pelvis at the
-floor. ``retarget.py`` therefore grounds every clip itself, and no loader corrects it.
+The height of the base is a convention of each source, and AMASS puts the pelvis at the
+floor. Thus ``retarget.py`` grounds every clip itself, and no loader corrects the height.
 """
 
 import re
@@ -31,103 +31,97 @@ import pyarrow.parquet as pq
 from common import G1_JOINT_NAMES
 from human import HumanClip, load_lafan1_bvh
 
+#: A G1 clip: the arrays that the module docstring lists, by name.
 Motion = dict[str, np.ndarray]
 
 
 class Source(NamedTuple):
-    """One motion set, where to fetch it, and how to read a clip of it."""
+    """One motion set, where to download it, and how to read a clip of it."""
 
-    #: What people call the set.
+    #: The name that people use for the set.
     title: str
-    #: The terms its clips, and so its motions, come under.
+    #: The terms of its clips, and thus of its motions.
     license: str
-    #: The skeleton its clips move, and so what of Lite they can drive.
+    #: The skeleton that its clips move, and thus what of Lite they can drive.
     skeleton: str
-    #: The directory of the clips, under the cache of the source. A motion is named
-    #: after the path of its clip below this directory.
+    #: The directory of the clips in the cache of the source, and the glob of a clip in that
+    #: directory. A motion gets its name from the path of its clip below this directory.
     clip_dir: str
     clip_glob: str
     #: Reads one clip: a human clip, or a G1 clip with its rate in Hz.
     load: Callable[[Path], HumanClip | tuple[Motion, int]]
-    #: The Hub dataset repo of the set, and what ``download.py`` fetches from it by
-    #: default, as Hub glob patterns.
+    #: The Hub dataset repo of the set, and the Hub glob patterns that ``download.py``
+    #: downloads from it by default.
     repo_id: str | None = None
     allow_patterns: tuple[str, ...] = ()
-    #: A zip of the clips, for a set that is not on the Hub, and the page it comes from.
+    #: A zip of the clips, for a set that is not on the Hub, and the page of the set.
     zip_url: str | None = None
     page: str | None = None
-    #: Turns the download, at the path it takes, into the clip files. None if it already is.
+    #: Turns the download, at its path, into the clip files. None if the download is clips.
     unpack: Callable[[Path], None] | None = None
 
 
 def load_lafan1(path: Path) -> tuple[Motion, int]:
-    """A headerless CSV at 30 Hz, with the base rotation in xyzw."""
+    """Read a CSV with no header, at 30 Hz, with the base rotation in xyzw."""
     return _motion(path, np.loadtxt(path, delimiter=",", dtype=np.float32), "xyzw"), 30
 
 
 def load_amass(path: Path) -> tuple[Motion, int]:
-    """A ``(T, 36)`` array, with the base rotation in xyzw.
+    """Read a ``(T, 36)`` array with the base rotation in xyzw.
 
-    The rate is that of the AMASS capture, which differs between subsets, and the file
-    name carries it: ``<take>_poses_<fps>_jpos.npy``.
+    The rate is that of the AMASS capture, which differs between subsets. The file name
+    holds it: ``<take>_poses_<fps>_jpos.npy``.
     """
     fps = int(re.fullmatch(r".*_(\d+)_jpos", path.stem).group(1))
     return _motion(path, np.load(path).astype(np.float32), "xyzw"), fps
 
 
 def load_motiondecode(path: Path) -> tuple[Motion, int]:
-    """A CSV at 120 Hz with a header row, with the base rotation in wxyz.
+    """Read a CSV with a header row, at 120 Hz, with the base rotation in wxyz.
 
-    The header names every column, so the joint order is checked rather than assumed.
+    The header names every column, so the loader checks the joint order and does not
+    assume it.
     """
     with path.open() as file:
         header = file.readline().strip().split(",")
-    joints = [f"dof_{name}(rad)" for name in G1_JOINT_NAMES]
-    if header[7:] != joints:
+    if header[7:] != [f"dof_{name}(rad)" for name in G1_JOINT_NAMES]:
         raise ValueError(f"{path}: the joint columns are not in the G1 order")
     raw = np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.float32, ndmin=2)
     return _motion(path, raw, "wxyz"), 120
 
 
 def load_kimodo(path: Path) -> tuple[Motion, int]:
-    """A ``(T, 36)`` array that :func:`unpack_kimodo` wrote, at 50 Hz, rotation in wxyz."""
+    """Read a ``(T, 36)`` array from :func:`unpack_kimodo`, at 50 Hz, with the rotation in wxyz."""
     return _motion(path, np.load(path), "wxyz"), 50
-
-
-def _task_group(text: str) -> str:
-    """The folder of a Kimodo prompt: the motion it asks for, or the family of a chain.
-
-    ``perform: a person bowing forward`` gives ``bowing_forward``. A long-horizon prompt
-    chains motions after the name of its family, so ``combat drill: kick → walk`` gives
-    ``combat_drill``.
-    """
-    if text.startswith("perform:"):
-        group = re.sub(r"^perform: (a person )?", "", text)
-    else:
-        group = text.split(":")[0]
-    return group.replace(" ", "_")
 
 
 def unpack_kimodo(root: Path) -> None:
     """Split the LeRobot shards into ``episodes/<group>/episode_<index>.npy``.
 
-    A row of ``observation.state`` is the base position, the base rotation in wxyz, the 29
-    joints in G1 order, and then their 29 velocities, which a clip does not keep. The group
-    comes from the text prompt of the episode, by :func:`_task_group`.
+    A row of ``observation.state`` holds the base position, the base rotation in wxyz, the
+    29 joints in G1 order, and then their 29 velocities, which a clip does not keep.
+
+    The group comes from the text prompt of the episode. It is the motion that the prompt
+    asks for, so ``perform: a person bowing forward`` goes to ``bowing_forward``. A
+    long-horizon prompt chains motions after the name of its family, so
+    ``combat drill: kick → walk`` goes to ``combat_drill``.
     """
     tasks = pq.read_table(root / "meta" / "tasks.parquet").to_pydict()
-    folders = {
-        index: _task_group(text)
-        for index, text in zip(tasks["task_index"], tasks["task"], strict=True)
-    }
+    groups = {}
+    for index, text in zip(tasks["task_index"], tasks["task"], strict=True):
+        if text.startswith("perform:"):
+            group = re.sub(r"^perform: (a person )?", "", text)
+        else:
+            group = text.split(":")[0]
+        groups[index] = group.replace(" ", "_")
     columns = ["episode_index", "task_index", "frame_index", "observation.state"]
     for shard in sorted((root / "data").glob("**/*.parquet")):
         try:
             table = pq.read_table(shard, columns=columns)
         except pa.ArrowInvalid as error:
-            # The last shard of each Kimodo set on the Hub ends without its footer, and
-            # no reader opens it.
-            print(f"Skipped {shard.relative_to(root)}, which cannot be read: {error}")
+            # The last shard of each Kimodo set on the Hub has no footer, and no reader
+            # can open it.
+            print(f"Skipped {shard.relative_to(root)}, because pyarrow cannot read it: {error}")
             continue
         episodes = table.column("episode_index").to_numpy()
         task = table.column("task_index").to_numpy()
@@ -138,13 +132,13 @@ def unpack_kimodo(root: Path) -> None:
         for episode in np.unique(episodes):
             rows = np.flatnonzero(episodes == episode)
             rows = rows[np.argsort(frame[rows])]
-            path = root / "episodes" / folders[int(task[rows[0]])] / f"episode_{episode:05d}.npy"
+            path = root / "episodes" / groups[int(task[rows[0]])] / f"episode_{episode:05d}.npy"
             path.parent.mkdir(parents=True, exist_ok=True)
             np.save(path, state[rows, :36])
 
 
-# A key holds no "_": a motion is named "<key>_<clip>", and the site reads the key back
-# from the name up to its first "_".
+#: Source key -> source. A key has no "_": a motion is named "<key>_<clip>", and the site
+#: reads the key back from the name up to its first "_".
 SOURCES: dict[str, Source] = {
     "lafan1bvh": Source(
         title="LAFAN1 BVH",
@@ -223,25 +217,28 @@ SOURCES: dict[str, Source] = {
 
 
 def clip_key(clip_dir: Path, path: Path) -> str:
-    """The path of a clip below the clip directory of its source, without the suffix."""
+    """Return the path of a clip below the clip directory of its source, without the suffix."""
     return path.relative_to(clip_dir).with_suffix("").as_posix()
 
 
 def motion_name(source: str, clip_dir: Path, path: Path) -> str:
     """Name a motion ``<source>_<path of its clip below clip_dir>``.
 
-    Every run of characters other than letters and digits becomes ``_``. The path, and
-    not the file name alone, keeps apart two takes of one name in two directories, which
-    AMASS and MotionDecode both have. A minus sign before a number becomes ``m`` instead,
-    because AMASS CNRS holds both ``-01_L_1`` and ``01_L_1``, and the sign is all that
-    tells them apart.
+    Every run of characters other than letters and digits becomes ``_``. The full path, and
+    not only the file name, keeps two takes with one name in two directories apart. AMASS
+    and MotionDecode both have such takes. A minus sign before a number becomes ``m``,
+    because AMASS CNRS has both ``-01_L_1`` and ``01_L_1``, and only the sign tells them
+    apart.
     """
     key = re.sub(r"(^|[/_ ])-(?=\d)", r"\1m", clip_key(clip_dir, path))
     return f"{source}_{re.sub(r'[^A-Za-z0-9]+', '_', key).strip('_')}"
 
 
 def _motion(path: Path, raw: np.ndarray, quat_order: str) -> Motion:
-    """Split ``(T, 36)`` rows into the arrays of a motion, with the rotation in wxyz."""
+    """Split ``(T, 36)`` rows into the arrays of a G1 clip, with the rotation in wxyz.
+
+    ``quat_order`` is the order of the base rotation in ``raw``: ``"wxyz"`` or ``"xyzw"``.
+    """
     columns = 7 + len(G1_JOINT_NAMES)
     if raw.ndim != 2 or raw.shape[1] != columns:
         raise ValueError(f"{path}: expected {columns} columns, got shape {raw.shape}")

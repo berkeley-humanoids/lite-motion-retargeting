@@ -1,37 +1,45 @@
-"""Map human motion onto Lite: where each Lite link should be, and the IK that puts it there.
+"""Map human motion onto Lite: the goal pose of each Lite link, and the IK that reaches it.
 
-The mapping is the part every retargeting backend shares. It turns the human bodies of
-``human.py`` into a goal pose for each Lite link in :data:`LITE_PAIRS`:
+Every retargeting backend shares this mapping. It turns the human bodies of ``human.py``
+into a goal pose for each Lite link in :data:`LITE_PAIRS`:
 
 * **Calibration.** Both skeletons stand in the T-pose, facing +x. The scale is the ratio of
-  their pelvis heights, and the rest pose of each Lite link is measured on the model.
+  their pelvis heights, and the rest pose of each Lite link comes from the model.
 * **Goal.** Each human body turns about a joint, and :data:`ANCHORS` names the Lite link at
   the same joint. The pelvis goes to the human pelvis, scaled. Every other joint hangs off
-  the joint above it by the segment between them in the Lite T-pose, turned by the
-  rest-normalized rotation of the human segment that joins them. A Lite link then turns
-  with its human body about that joint. The goals therefore form a skeleton with the
-  proportions of Lite and the joint rotations of the human, which Lite can reach wherever
-  its joints allow.
+  the joint above it by the segment between them in the Lite T-pose. The rest-normalized
+  rotation of the human segment that joins the two joints turns this segment. A Lite link
+  then turns with its human body about that joint. Thus the goals form a skeleton with the
+  proportions of Lite and the joint rotations of the human, and Lite can reach this
+  skeleton wherever its joints allow.
 * **Planting.** A skeleton with other proportions does not step where the human steps, so
-  a foot the human plants would slide. :func:`plant` moves the whole goal skeleton, frame
-  by frame, so that the sole point a planted foot touches the floor with stays where it is
-  and on the floor. The goals stay reachable, since a shift of all of them is. A foot that
-  would still dip below the floor rises out of it on its own.
+  a foot that the human plants would slide. :func:`plant` moves the whole goal skeleton,
+  frame by frame, so that the sole point where a planted foot touches the floor stays in
+  place and on the floor. A shift of all the goals together keeps them reachable. If a foot
+  still dips below the floor, only the goal of that foot rises.
 
-The IK backend solves for the joints that reach these goals, frame by frame. An RL backend
-such as ReActor tracks the same goals in simulation.
+The IK backend (:func:`solve_ik`) solves for the joints that reach these goals, frame by
+frame. An RL backend such as ReActor tracks the same goals in simulation.
 """
 
 from typing import NamedTuple
 
 import mujoco
 import numpy as np
-from common import FPS, Sole, body_id, lowest_points, quat_mul, sole_points
+from common import (
+    FPS,
+    Sole,
+    body_id,
+    joint_qpos_addr,
+    lowest_points,
+    quat_mul,
+    sole_points,
+)
 from human import HUMAN_BODIES, HUMAN_PARENTS
 from lite_description import get_mjcf_path
 from scipy.ndimage import uniform_filter1d
 
-#: Human body -> the Lite link at the joint it turns about. A toe has no Lite joint.
+#: Human body -> the Lite link at the joint that the body turns about. A toe has none.
 ANCHORS: dict[str, str] = {
     "pelvis": "pelvis",
     "left_hip": "left_hip_pitch",
@@ -54,17 +62,17 @@ ANCHORS: dict[str, str] = {
 
 
 class Pair(NamedTuple):
-    """The human body a Lite link turns with, and the IK cost of each half of its pose."""
+    """The human body that a Lite link turns with, and the IK cost of each half of its pose."""
 
     human: str
     position_cost: float
     orientation_cost: float
 
 
-#: Lite link -> the human body it turns with, the root first. Every link the IK aims at.
-#: A cost weighs metres against radians: a position cost of 10 weighs 1 cm like an
-#: orientation cost of 1 weighs 0.1 rad. The thigh, shin, upper arm and forearm carry an
-#: orientation goal, so no limb can twist about itself while its end still lands on its goal.
+#: Lite link -> its :class:`Pair`, for every link that the IK aims at, the root first. A
+#: cost weighs metres against radians: a position cost of 10 on 1 cm weighs as much as an
+#: orientation cost of 1 on 0.1 rad. The thigh, shin, upper arm, and forearm have an
+#: orientation goal, so that no limb can twist about itself while its end stays on its goal.
 LITE_PAIRS: dict[str, Pair] = {
     "pelvis": Pair("pelvis", 2.0, 1.0),
     "left_hip_yaw": Pair("left_hip", 0.0, 1.0),
@@ -86,23 +94,23 @@ LITE_PAIRS: dict[str, Pair] = {
 #: The Lite bodies that stand on the floor.
 FEET: tuple[str, ...] = ("left_foot", "right_foot")
 
-#: Per-DoF posture cost. It only settles what the goals leave open, except at a finger,
-#: which no human body drives and which it holds straight, and at an ankle yaw, which
-#: it keeps from turning the foot in place of the hip.
+#: Posture cost of each DoF. It only settles what the goals leave open.
 _POSTURE_COST: float = 1e-2
+#: Posture cost of a finger. No human body drives a finger, and the posture holds it straight.
 _FINGER_COST: float = 1e3
+#: Posture cost of an ankle yaw. It keeps the ankle from turning the foot in place of the hip.
 _ANKLE_YAW_COST: float = 1.0
 
-#: rad/s. The IK turns no joint faster. A human motion rarely asks for more, except where
-#: the arm passes the T-pose, in which the shoulder pitch and yaw of Lite share an axis, and
-#: the solution would swap one for the other in a single frame.
+#: rad/s. The IK turns no joint faster than this. A human motion rarely asks for more. The
+#: exception is an arm that passes the T-pose: there the shoulder pitch and yaw of Lite share
+#: an axis, and without the limit the solution would swap one for the other in one frame.
 _JOINT_SPEED: float = 20.0
 
-#: Frames. :func:`plant` averages its height shift over this window, so the body does not
-#: jump when the foot it stands on changes.
+#: Frames. :func:`plant` averages its height shift over this window, so that the body does
+#: not jump when it changes the foot it stands on.
 _HEIGHT_WINDOW: int = 5
 
-#: Newton steps on the first frame, which starts from the T-pose rather than the last frame.
+#: Newton steps on the first frame, which starts from the T-pose and not from the frame before.
 _FIRST_FRAME_ITERS: int = 50
 
 
@@ -110,8 +118,8 @@ class Calibration(NamedTuple):
     """The constants that take one human skeleton onto Lite."""
 
     scale: float
-    #: Each link of :data:`LITE_PAIRS` in the Lite T-pose: standing on the floor at the
-    #: origin, facing +x. Its position, and its world rotation, wxyz.
+    #: Each link of :data:`LITE_PAIRS` in the Lite T-pose, on the floor at the origin and
+    #: facing +x: its position, and its world rotation in wxyz.
     rest_pos: np.ndarray
     rest_quat: np.ndarray
     #: Human body -> the position of its :data:`ANCHORS` link in that T-pose.
@@ -119,7 +127,7 @@ class Calibration(NamedTuple):
 
 
 def load_floating_model() -> mujoco.MjModel:
-    """The Lite Pro MJCF with a free joint on the pelvis, for an IK that moves the base."""
+    """Load the Lite Pro MJCF with a free joint on the pelvis, so that the IK moves the base."""
     spec = mujoco.MjSpec.from_file(str(get_mjcf_path("lite_pro")))
     spec.body("pelvis").add_freejoint()
     return spec.compile()
@@ -132,22 +140,26 @@ def calibrate(lite: mujoco.MjModel, human_rest: np.ndarray) -> Calibration:
     """
     data = mujoco.MjData(lite)
     mujoco.mj_kinematics(lite, data)
+    # One frame of the zero pose: no joint columns, and the base at the origin.
     soles = sole_points(lite, np.zeros(0, dtype=np.int32), np.zeros((1, 0)), np.zeros((1, 3)),
                         np.array([[1.0, 0.0, 0.0, 0.0]]), FEET)
+    # The lift puts the soles on the floor. The pelvis is at the origin, so the lift is also
+    # the height of the pelvis.
     lift = np.array([0.0, 0.0, -soles[0, :, 2].min()])
     ids = [body_id(lite, link) for link in LITE_PAIRS]
     return Calibration(
         scale=float(lift[2] / human_rest[HUMAN_BODIES.index("pelvis"), 2]),
         rest_pos=data.xpos[ids] + lift,
-        rest_quat=data.xquat[ids].copy(),
+        rest_quat=data.xquat[ids],
         joints={body: data.xpos[body_id(lite, link)] + lift for body, link in ANCHORS.items()},
     )
 
 
 def driven_joints(lite: mujoco.MjModel) -> tuple[str, ...]:
-    """The joints the goals drive: every joint between the root and a link of :data:`LITE_PAIRS`.
+    """Return the joints that the goals drive, sorted by name.
 
-    No goal lies beyond a hand, so the fingers are not among them.
+    These are the joints between the root and a link of :data:`LITE_PAIRS`. No goal lies
+    beyond a hand, so the fingers are not among them.
     """
     driven = set()
     for link in LITE_PAIRS:
@@ -160,44 +172,45 @@ def driven_joints(lite: mujoco.MjModel) -> tuple[str, ...]:
 
 
 def goals(pos: np.ndarray, quat: np.ndarray, calibration: Calibration) -> tuple[np.ndarray, np.ndarray]:
-    """World goal pose of each link of :data:`LITE_PAIRS`, per frame.
+    """Return the world goal pose of each link of :data:`LITE_PAIRS`, per frame.
 
     ``pos`` ``(T, B, 3)`` and ``quat`` ``(T, B, 4)`` are human bodies as ``human.py`` defines
     them. Returns ``(T, P, 3)`` positions and ``(T, P, 4)`` wxyz rotations.
     """
     rotation = _matrices(quat)
     joints = {"pelvis": calibration.scale * pos[:, HUMAN_BODIES.index("pelvis")]}
-    for body in HUMAN_BODIES[1:]:
+    for body, parent in HUMAN_PARENTS.items():
         if body in ANCHORS:
-            parent = HUMAN_PARENTS[body]
             segment = calibration.joints[body] - calibration.joints[parent]
             joints[body] = joints[parent] + rotation[:, HUMAN_BODIES.index(parent)] @ segment
 
-    human = [HUMAN_BODIES.index(pair.human) for pair in LITE_PAIRS.values()]
+    bodies = [HUMAN_BODIES.index(pair.human) for pair in LITE_PAIRS.values()]
     goal_pos = np.stack([
-        joints[pair.human] + rotation[:, index] @ (rest - calibration.joints[pair.human])
-        for pair, index, rest in zip(LITE_PAIRS.values(), human, calibration.rest_pos, strict=True)
+        joints[pair.human] + rotation[:, body] @ (rest - calibration.joints[pair.human])
+        for pair, body, rest in zip(LITE_PAIRS.values(), bodies, calibration.rest_pos, strict=True)
     ], axis=1)
-    goal_quat = quat_mul(quat[:, human], calibration.rest_quat)
+    goal_quat = quat_mul(quat[:, bodies], calibration.rest_quat)
     return goal_pos.astype(np.float32), goal_quat.astype(np.float32)
 
 
 def plant(goal_pos: np.ndarray, goal_quat: np.ndarray, feet_planted: np.ndarray, foot_sole: Sole) -> np.ndarray:
-    """Shift the goals of :func:`goals` so a planted foot neither slides nor leaves the floor.
+    """Shift the goals of :func:`goals` so that a planted foot does not slide or leave the floor.
 
-    ``feet_planted`` ``(T, 2)`` says which of :data:`FEET` the source stands on. Between two
-    frames where a foot is planted, the sole point it touches with moves as a point of the
-    foot, and the goals shift back by that slide, averaged over the planted feet. In a frame
-    with a foot planted, the goals shift down by the height of its lowest sole point; across
-    frames with none, such as the flight of a jump, the shift runs straight from the one
-    before to the one after. A foot whose sole is still below the floor then rises out of
-    it. Returns the shifted ``goal_pos``.
+    ``feet_planted`` ``(T, 2)`` tells which of :data:`FEET` the source stands on. Between two
+    frames where a foot is planted, the lowest point of its sole moves as a point of the
+    foot. The goals shift back by that slide, averaged over the planted feet. In a frame
+    with a planted foot, the goals shift down by the height of the lowest sole point,
+    averaged over the planted feet. Across frames with no planted foot, such as the flight
+    of a jump, the height shift changes linearly from the frame before to the frame after.
+    If the sole of a foot is still below the floor, the goal of that foot rises out of it.
+    Returns the shifted ``goal_pos``.
     """
     feet = [list(LITE_PAIRS).index(foot) for foot in FEET]
     foot_pos = goal_pos[:, feet].astype(np.float64)
     foot_rot = _matrices(goal_quat[:, feet])
     lowest = lowest_points(foot_sole, foot_pos, foot_rot)
 
+    # The horizontal shift cancels the slide of the planted feet.
     local = np.einsum("tfji,tfj->tfi", foot_rot[:-1], lowest[:-1] - foot_pos[:-1])
     moved = foot_pos[1:] + np.einsum("tfij,tfj->tfi", foot_rot[1:], local)
     both = feet_planted[1:] & feet_planted[:-1]
@@ -205,6 +218,7 @@ def plant(goal_pos: np.ndarray, goal_quat: np.ndarray, feet_planted: np.ndarray,
     step = -slide / np.maximum(both.sum(axis=1), 1)[:, None]
     shift_xy = np.concatenate([np.zeros((1, 2)), np.cumsum(step, axis=0)])
 
+    # The vertical shift puts the planted feet on the floor.
     frames = np.arange(goal_pos.shape[0])
     standing = feet_planted.any(axis=1)
     height = np.sum(lowest[..., 2] * feet_planted, axis=1) / np.maximum(feet_planted.sum(axis=1), 1)
@@ -216,8 +230,7 @@ def plant(goal_pos: np.ndarray, goal_quat: np.ndarray, feet_planted: np.ndarray,
     out = goal_pos.copy()
     out[..., :2] += shift_xy[:, None].astype(np.float32)
     out[..., 2] += shift_z[:, None].astype(np.float32)
-    # A foot that still dips below the floor, such as one that lands while it is still
-    # moving, rises out of it on its own.
+    # A foot that lands while it still moves can dip below the floor.
     depth = -lowest[..., 2] - shift_z[:, None]
     out[:, feet, 2] += np.maximum(depth, 0.0).astype(np.float32)
     return out
@@ -230,12 +243,13 @@ def solve_ik(
     goal_quat: np.ndarray,
     iters: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per-frame IK of the floating-base ``model`` onto the goals of :func:`goals`.
+    """Solve the IK of the floating-base ``model`` for the goals of :func:`goals`, per frame.
 
-    Each frame starts from the last one, so the solution moves continuously, and no joint
-    turns faster than :data:`_JOINT_SPEED` between two frames. Returns the base position
-    ``(T, 3)``, the base rotation ``(T, 4)`` wxyz, and ``(T, J)`` joint positions in the
-    order of ``joint_names``.
+    Each frame starts from the solution of the frame before, so that the solution moves
+    continuously. ``iters`` is the number of Newton steps on each frame after the first. No
+    joint turns faster than :data:`_JOINT_SPEED` between two frames. Returns the base
+    position ``(T, 3)``, the base rotation ``(T, 4)`` in wxyz, and the ``(T, J)`` joint
+    positions in the order of ``joint_names``.
     """
     import mink
 
@@ -245,20 +259,29 @@ def solve_ik(
                        orientation_cost=pair.orientation_cost, lm_damping=1.0)
         for link, pair in LITE_PAIRS.items()
     ]
-    posture = mink.PostureTask(model, cost=_posture_costs(model))
+    posture_cost = np.full(model.nv, _POSTURE_COST)
+    for joint in range(model.njnt):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint) or ""
+        dof = model.jnt_dofadr[joint]
+        if model.jnt_type[joint] == mujoco.mjtJoint.mjJNT_FREE:
+            posture_cost[dof:dof + 6] = 0.0
+        elif "_finger" in name:
+            posture_cost[dof] = _FINGER_COST
+        elif "ankle_yaw" in name:
+            posture_cost[dof] = _ANKLE_YAW_COST
+    posture = mink.PostureTask(model, cost=posture_cost)
     position_limit = mink.ConfigurationLimit(model)
     speed_limit = mink.VelocityLimit(model, dict.fromkeys(joint_names, _JOINT_SPEED))
-    # A Newton step takes this long, so the steps of one frame add up to one frame, and the
-    # speed limit holds between frames.
+    # The Newton steps of one frame add up to one frame, so that the speed limit holds
+    # between frames.
     step = 1.0 / (FPS * iters)
-    joint_addrs = np.asarray(
-        [model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)] for name in joint_names]
-    )
+    joint_addrs = np.asarray([joint_qpos_addr(model, name) for name in joint_names])
 
-    # Joints at zero are the T-pose. The posture task ignores the base it holds.
+    # The joints at zero are the T-pose. The posture task has no cost on the base, so its
+    # target base has no effect.
     start = np.zeros(model.nq)
     start[:3], start[3:7] = goal_pos[0, 0], goal_quat[0, 0]
-    posture.set_target(start.copy())
+    posture.set_target(start)
     configuration.update(start)
 
     frames = goal_pos.shape[0]
@@ -270,9 +293,12 @@ def solve_ik(
             task.set_target(mink.SE3.from_rotation_and_translation(
                 mink.SO3(goal_quat[t, index].astype(np.float64)), goal_pos[t, index].astype(np.float64)
             ))
-        # The first frame moves from the T-pose in no time, so no speed limit applies to it.
-        dt, limits = (1.0, [position_limit]) if t == 0 else (step, [position_limit, speed_limit])
-        for _ in range(_FIRST_FRAME_ITERS if t == 0 else iters):
+        if t == 0:
+            # The first frame moves from the T-pose in no time, so no speed limit applies.
+            dt, limits, newton_steps = 1.0, [position_limit], _FIRST_FRAME_ITERS
+        else:
+            dt, limits, newton_steps = step, [position_limit, speed_limit], iters
+        for _ in range(newton_steps):
             velocity = mink.solve_ik(configuration, [*tasks, posture], dt, "daqp", damping=1e-1, limits=limits)
             configuration.integrate_inplace(velocity, dt)
         base_pos[t], base_quat[t] = configuration.q[:3], configuration.q[3:7]
@@ -281,23 +307,8 @@ def solve_ik(
     return base_pos, base_quat, joint_pos
 
 
-def _posture_costs(model: mujoco.MjModel) -> np.ndarray:
-    """Posture cost per DoF: none on the free joint, see :data:`_POSTURE_COST` for the rest."""
-    cost = np.full(model.nv, _POSTURE_COST)
-    for joint in range(model.njnt):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint) or ""
-        dof = model.jnt_dofadr[joint]
-        if model.jnt_type[joint] == mujoco.mjtJoint.mjJNT_FREE:
-            cost[dof:dof + 6] = 0.0
-        elif "_finger" in name:
-            cost[dof] = _FINGER_COST
-        elif "ankle_yaw" in name:
-            cost[dof] = _ANKLE_YAW_COST
-    return cost
-
-
 def _matrices(quat: np.ndarray) -> np.ndarray:
-    """Rotation matrices ``(..., 3, 3)`` from wxyz quaternions ``(..., 4)``."""
+    """Convert wxyz quaternions ``(..., 4)`` to rotation matrices ``(..., 3, 3)``."""
     w, x, y, z = np.moveaxis(quat.astype(np.float64), -1, 0)
     return np.stack([
         np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], -1),

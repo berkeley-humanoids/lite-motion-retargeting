@@ -1,18 +1,18 @@
 """Human motion in one skeleton, whatever format a source ships it in.
 
-A reader turns one clip into world poses of :data:`HUMAN_BODIES`. Every array is world
-frame, metres, z up, and the floor of the source at ``z = 0``:
+A reader turns one clip into world poses of :data:`HUMAN_BODIES`. Every array is in world
+frame and metres, with z up and the floor of the source at ``z = 0``:
 
     pos   (T, B, 3)
     quat  (T, B, 4)  wxyz, rest-normalized
-    rest  (B, 3)     each body in the T-pose: standing on the floor, facing +x, left +y
+    rest  (B, 3)     each body in the T-pose: on the floor, facing +x, left along +y
 
 A rest-normalized rotation is the world rotation of the body times the inverse of its
-world rotation in the T-pose. Identity therefore means "as in the T-pose" for every
-source, whatever axes its joints use, and a robot mapping needs no offsets per source.
+world rotation in the T-pose. Thus identity means "as in the T-pose" for every source,
+whatever axes its joints use, and a robot mapping needs no offsets per source.
 
-A body is the frame at a joint of the skeleton, turned with the segment that starts
-there: ``left_knee`` sits at the knee and turns with the shin.
+A body is the frame at a joint of the skeleton, and it turns with the segment that starts
+at that joint: ``left_knee`` sits at the knee and turns with the shin.
 """
 
 from pathlib import Path
@@ -21,7 +21,8 @@ from typing import NamedTuple
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-#: The skeleton every source maps onto, after the keypoints of the Lite conventions.
+#: The skeleton that every source maps onto, named after the keypoints of the Lite
+#: conventions. A parent comes before its children.
 HUMAN_BODIES: tuple[str, ...] = (
     "pelvis",
     "left_hip",
@@ -44,7 +45,7 @@ HUMAN_BODIES: tuple[str, ...] = (
     "right_hand",
 )
 
-#: The parent of each body of :data:`HUMAN_BODIES`, the root first.
+#: The parent of each body of :data:`HUMAN_BODIES` except the root, in the same order.
 HUMAN_PARENTS: dict[str, str] = {
     "left_hip": "pelvis",
     "left_knee": "left_hip",
@@ -68,11 +69,11 @@ HUMAN_PARENTS: dict[str, str] = {
 
 
 class HumanClip(NamedTuple):
-    """One clip at its own rate: the skeleton of the source, and the same motion in ours.
+    """One clip at its own rate, in the skeleton of the source and in :data:`HUMAN_BODIES`.
 
-    The ``source_*`` arrays are every joint of the source skeleton as published, in world
-    frame, metres, z up, wxyz. The rest are :data:`HUMAN_BODIES`, as the module docstring
-    defines them.
+    The ``source_*`` arrays hold every joint of the source skeleton as published, in world
+    frame, metres, z up, and wxyz. The other arrays hold :data:`HUMAN_BODIES`, as the module
+    docstring defines them.
     """
 
     fps: int
@@ -86,12 +87,13 @@ class HumanClip(NamedTuple):
 
 # ── LAFAN1 ────────────────────────────────────────────────────────────────────
 
-#: BVH is y up. This takes a BVH vector (x, y, z) to (z, x, y), z up. A LAFAN1 actor then
-#: stands in the T-pose that opens every take facing +x, with the left arm along +y.
+#: Rotation from BVH axes (y up) to world axes (z up): a BVH vector (x, y, z) becomes
+#: (z, x, y). In world axes, the LAFAN1 actor in the T-pose at the start of every take faces
+#: +x, with the left arm along +y.
 _BVH_TO_WORLD: np.ndarray = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
-#: Our body -> the LAFAN1 joint at the same place. ``Spine1`` and the clavicles
-#: (``LeftShoulder``, ``RightShoulder``) have no body of ours.
+#: Body of :data:`HUMAN_BODIES` -> the LAFAN1 joint at the same place. No body maps to
+#: ``Spine1`` or to the clavicles (``LeftShoulder``, ``RightShoulder``).
 LAFAN1_JOINTS: dict[str, str] = {
     "pelvis": "Hips",
     "left_hip": "LeftUpLeg",
@@ -114,13 +116,14 @@ LAFAN1_JOINTS: dict[str, str] = {
     "right_hand": "RightHand",
 }
 
-#: Radians. In a flat stance a LAFAN1 foot bone, which runs from the ankle to the ball of
-#: the foot, points this far below the horizontal (median over the T-pose of every take).
+#: Radians. In a flat stance, a LAFAN1 foot bone points this far below the horizontal. The
+#: bone runs from the ankle to the ball of the foot. The value is the median over the
+#: T-pose of every take.
 _LAFAN1_FOOT_PITCH: float = np.radians(20.0)
 
 
 def _frame(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """The rotation whose x axis is ``x`` and whose y axis is ``y`` made orthogonal to it."""
+    """Return the rotation whose x axis is ``x`` and whose y axis is ``y`` made orthogonal to it."""
     x = x / np.linalg.norm(x)
     y = y - x * (x @ y)
     y = y / np.linalg.norm(y)
@@ -128,11 +131,11 @@ def _frame(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
 
 def _lafan1_rest() -> dict[str, np.ndarray]:
-    """World rotation of each LAFAN1 joint in the T-pose, facing +x.
+    """Return the world rotation of each LAFAN1 joint in the T-pose, facing +x.
 
-    A LAFAN1 joint points its bone along its own +x. Its +y points forward along the
-    trunk and legs, and backward along the arms. Every take opens in a T-pose that matches
-    this table to within the few degrees an actor holds it.
+    A LAFAN1 joint points its bone along its own +x. Its +y points forward along the trunk
+    and the legs, and backward along the arms. The T-pose at the start of every take matches
+    this table to within a few degrees, because an actor does not hold the pose exactly.
     """
     forward, left, up = np.eye(3)
     foot = np.array([np.cos(_LAFAN1_FOOT_PITCH), 0.0, -np.sin(_LAFAN1_FOOT_PITCH)])
@@ -154,8 +157,9 @@ def load_lafan1_bvh(path: Path) -> HumanClip:
     names, parents, offsets, channels, values, frame_time = _read_bvh(path)
     rotations, positions = _bvh_world(parents, offsets, channels, values)
 
-    # The T-pose: an offset is in the frame of the parent joint, which the rest table turns
-    # into the world. The toe joints stand on the floor, as they do in the takes.
+    # Build the T-pose from the offsets. An offset is in the frame of the parent joint, and
+    # the rest table turns that frame into the world. The toes stand on the floor, as they
+    # do in the takes.
     rest_pos = np.zeros((len(names), 3))
     for joint, parent in enumerate(parents):
         if parent >= 0:
@@ -164,17 +168,17 @@ def load_lafan1_bvh(path: Path) -> HumanClip:
 
     world_rot = _BVH_TO_WORLD @ rotations
     world_pos = positions @ _BVH_TO_WORLD.T
-    index = [names.index(LAFAN1_JOINTS[body]) for body in HUMAN_BODIES]
-    rest_rot = np.stack([_LAFAN1_REST[LAFAN1_JOINTS[body]] for body in HUMAN_BODIES])
-    normalized = world_rot[:, index] @ np.swapaxes(rest_rot, -1, -2)
+    joints = [names.index(LAFAN1_JOINTS[body]) for body in HUMAN_BODIES]
+    rest_rot = np.stack([_LAFAN1_REST[names[joint]] for joint in joints])
+    normalized = world_rot[:, joints] @ np.swapaxes(rest_rot, -1, -2)
     return HumanClip(
         fps=round(1.0 / frame_time),
         source_bodies=tuple(names),
         source_pos=world_pos.astype(np.float32),
         source_quat=_wxyz(world_rot),
-        pos=world_pos[:, index].astype(np.float32),
+        pos=world_pos[:, joints].astype(np.float32),
         quat=_wxyz(normalized),
-        rest=rest_pos[index].astype(np.float32),
+        rest=rest_pos[joints].astype(np.float32),
     )
 
 
@@ -182,11 +186,12 @@ def load_lafan1_bvh(path: Path) -> HumanClip:
 
 
 def _read_bvh(path: Path) -> tuple[list[str], list[int], np.ndarray, list[list[str]], np.ndarray, float]:
-    """Parse a BVH file into its joints and its frames, in the units of the file.
+    """Parse a BVH file in centimetres into its joints and its frames.
 
-    Returns the joint names, the parent index of each (``-1`` for the root), the offset of
-    each from its parent, the channels of each, a ``(T, channels)`` array of the frames,
-    and the frame time in seconds. End sites carry no channels and are dropped.
+    Returns the joint names, the parent index of each joint (``-1`` for the root), the
+    offset of each joint from its parent in metres, the channels of each joint, the
+    ``(T, C)`` channel values as the file stores them, and the frame time in seconds. The
+    parser skips end sites, because they have no channels.
     """
     names: list[str] = []
     parents: list[int] = []
@@ -195,10 +200,10 @@ def _read_bvh(path: Path) -> tuple[list[str], list[int], np.ndarray, list[list[s
     stack: list[int] = []
     in_end_site = False
     lines = path.read_text().splitlines()
-    line = 0
-    while not lines[line].strip().startswith("MOTION"):
-        tokens = lines[line].split()
-        line += 1
+    motion = next((index for index, line in enumerate(lines) if line.strip().startswith("MOTION")), None)
+    if motion is None:
+        raise ValueError(f"{path} has no MOTION section.")
+    for tokens in map(str.split, lines[:motion]):
         if not tokens:
             continue
         if tokens[0] in ("ROOT", "JOINT"):
@@ -217,18 +222,19 @@ def _read_bvh(path: Path) -> tuple[list[str], list[int], np.ndarray, list[list[s
             offsets.append([float(value) for value in tokens[1:4]])
         elif tokens[0] == "CHANNELS":
             channels.append(tokens[2:])
-    frames = int(lines[line + 1].split()[1])
-    frame_time = float(lines[line + 2].split()[2])
-    values = np.loadtxt(lines[line + 3:line + 3 + frames], dtype=np.float64, ndmin=2)
+    frames = int(lines[motion + 1].split()[1])
+    frame_time = float(lines[motion + 2].split()[2])
+    values = np.loadtxt(lines[motion + 3:motion + 3 + frames], dtype=np.float64, ndmin=2)
     return names, parents, np.asarray(offsets) / 100.0, channels, values, frame_time
 
 
 def _bvh_world(
     parents: list[int], offsets: np.ndarray, channels: list[list[str]], values: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """World rotation ``(T, J, 3, 3)`` and position ``(T, J, 3)`` of every joint, in BVH axes.
+    """Return the world rotation ``(T, J, 3, 3)`` and position ``(T, J, 3)`` of every joint.
 
-    Positions are in metres: a position channel is centimetres, like the offsets.
+    The result is in BVH axes and metres. ``offsets`` are in metres, and the position
+    channels in ``values`` are in centimetres.
     """
     frames = values.shape[0]
     rotations = np.empty((frames, len(parents), 3, 3))
@@ -244,7 +250,7 @@ def _bvh_world(
                 axes += channel[0]
                 angles.append(values[:, column])
             column += 1
-        # Channels list the rotations outermost first, which is scipy's intrinsic order.
+        # The channels list the rotations outermost first: the intrinsic order of scipy.
         local_rot = Rotation.from_euler(axes, np.stack(angles, axis=1), degrees=True).as_matrix()
         if parent < 0:
             rotations[:, joint], positions[:, joint] = local_rot, local_pos
@@ -257,7 +263,7 @@ def _bvh_world(
 
 
 def _wxyz(matrices: np.ndarray) -> np.ndarray:
-    """Unit wxyz quaternions with ``w >= 0`` from rotation matrices of any leading shape."""
+    """Convert rotation matrices ``(..., 3, 3)`` to float32 wxyz quaternions with ``w >= 0``."""
     shape = matrices.shape[:-2]
     xyzw = Rotation.from_matrix(matrices.reshape(-1, 3, 3)).as_quat()
     xyzw[xyzw[:, 3] < 0] *= -1.0

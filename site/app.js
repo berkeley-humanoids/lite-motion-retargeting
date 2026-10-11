@@ -963,7 +963,7 @@ function describe(entry) {
   link.href = source.url;
   link.target = "_blank";
   link.rel = "noopener";
-  link.textContent = "Source dataset on the Hub";
+  link.textContent = source.url.includes("huggingface.co") ? "Source dataset on the Hub" : "Source dataset";
   const dt = document.createElement("dt");
   dt.textContent = "Upstream";
   const dd = document.createElement("dd");

@@ -1,9 +1,13 @@
-"""The motion sets this pipeline reads, each already retargeted to the 29-DoF Unitree G1.
+"""The motion sets this pipeline reads: human motion, or motion already on the Unitree G1.
 
-Every source stores the same 36 numbers per frame: the base position, the base rotation,
-and the joints in the order of :data:`common.G1_JOINT_NAMES`. The sources differ only in
-file format, quaternion order, and rate, so a loader is all a new source needs. A loader
-reads one clip and returns it at its own rate:
+A human source, such as the LAFAN1 BVH takes, has a loader that returns a
+:class:`human.HumanClip`: the bodies of one shared human skeleton, which ``human.py``
+defines. A new human format needs a reader into that skeleton and nothing else.
+
+A G1 source was retargeted to the 29-DoF G1 by its authors. Every one stores the same 36
+numbers per frame: the base position, the base rotation, and the joints in the order of
+:data:`common.G1_JOINT_NAMES`. They differ only in file format, quaternion order, and
+rate, and a loader reads one clip and returns it at its own rate:
 
     base_pos        (T, 3)   world, metres
     base_quat_wxyz  (T, 4)   world, wxyz, w >= 0
@@ -25,26 +29,31 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from common import G1_JOINT_NAMES
+from human import HumanClip, load_lafan1_bvh
 
 Motion = dict[str, np.ndarray]
 
 
 class Source(NamedTuple):
-    """One motion set on the Hub, and how to read a clip of it."""
+    """One motion set, where to fetch it, and how to read a clip of it."""
 
     #: What people call the set.
     title: str
     #: The terms its clips, and so its motions, come under.
     license: str
-    repo_id: str
-    #: What ``download.py`` fetches by default, as Hub glob patterns.
-    allow_patterns: tuple[str, ...]
     #: The directory of the clips, under the cache of the source. A motion is named
     #: after the path of its clip below this directory.
     clip_dir: str
     clip_glob: str
-    #: Reads one clip, and returns it with its rate in Hz.
-    load: Callable[[Path], tuple[Motion, int]]
+    #: Reads one clip: a human clip, or a G1 clip with its rate in Hz.
+    load: Callable[[Path], HumanClip | tuple[Motion, int]]
+    #: The Hub dataset repo of the set, and what ``download.py`` fetches from it by
+    #: default, as Hub glob patterns.
+    repo_id: str | None = None
+    allow_patterns: tuple[str, ...] = ()
+    #: A zip of the clips, for a set that is not on the Hub, and the page it comes from.
+    zip_url: str | None = None
+    page: str | None = None
     #: Turns the download, at the path it takes, into the clip files. None if it already is.
     unpack: Callable[[Path], None] | None = None
 
@@ -135,6 +144,15 @@ def unpack_kimodo(root: Path) -> None:
 # A key holds no "_": a motion is named "<key>_<clip>", and the site reads the key back
 # from the name up to its first "_".
 SOURCES: dict[str, Source] = {
+    "lafan1bvh": Source(
+        title="LAFAN1 BVH",
+        license="CC BY-NC-ND 4.0",
+        zip_url="https://media.githubusercontent.com/media/ubisoft/ubisoft-laforge-animation-dataset/master/lafan1/lafan1.zip",
+        page="https://github.com/ubisoft/ubisoft-laforge-animation-dataset",
+        clip_dir="bvh",
+        clip_glob="*.bvh",
+        load=load_lafan1_bvh,
+    ),
     "lafan1": Source(
         title="LAFAN1",
         license="CC BY-NC-ND 4.0",

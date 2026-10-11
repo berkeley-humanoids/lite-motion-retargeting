@@ -1,11 +1,13 @@
-"""Download a motion source, and the G1 model it was retargeted to, from the Hub.
+"""Download a motion source, and the G1 model the G1 sources were retargeted to.
 
-The G1 URDF and its meshes go to ``.cache/g1/``, because every source shares them. The
-clips go to ``.cache/<source>/``. ``--include`` takes Hub glob patterns in place of the
-default ones of the source, to fetch part of a large set.
+The G1 URDF and its meshes go to ``.cache/g1/``, because every G1 source shares them. The
+clips go to ``.cache/<source>/``: from the Hub, or from the zip of a source that is not on
+the Hub. ``--include`` takes Hub glob patterns in place of the default ones of the source,
+to fetch part of a large set.
 
 Usage:
     uv run scripts/download.py
+    uv run scripts/download.py --source lafan1bvh
     uv run scripts/download.py --source amass --include 'g1/CMU/**' 'g1/KIT/**'
     uv run scripts/download.py --source motiondecode --include 'samples/1.3.Basic_Gait_Category/**'
     uv run scripts/download.py --source kimodo
@@ -13,6 +15,8 @@ Usage:
 """
 
 import sys
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import tyro
@@ -20,6 +24,7 @@ from huggingface_hub import snapshot_download
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import CACHE_ROOT, G1_REPO_ID, G1_URDF_PATH  # noqa: E402
+from human import HumanClip  # noqa: E402
 from sources import SOURCES  # noqa: E402
 
 #: Files fetched at once. AMASS and MotionDecode are tens of thousands of small files, so
@@ -47,22 +52,34 @@ def main(source: str = "lafan1", include: list[str] | None = None, force: bool =
         force_download=force,
         max_workers=DOWNLOAD_WORKERS,
     )
-    local_path = Path(snapshot_download(
-        repo_id=spec.repo_id,
-        repo_type="dataset",
-        local_dir=str(CACHE_ROOT / source),
-        allow_patterns=include or list(spec.allow_patterns),
-        force_download=force,
-        max_workers=DOWNLOAD_WORKERS,
-    ))
+    local_path = CACHE_ROOT / source
+    if spec.zip_url is not None:
+        archive = local_path / spec.zip_url.rsplit("/", 1)[1]
+        if force or not archive.exists():
+            local_path.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(spec.zip_url, archive)
+        with zipfile.ZipFile(archive) as files:
+            files.extractall(local_path / spec.clip_dir)
+    else:
+        snapshot_download(
+            repo_id=spec.repo_id,
+            repo_type="dataset",
+            local_dir=str(local_path),
+            allow_patterns=include or list(spec.allow_patterns),
+            force_download=force,
+            max_workers=DOWNLOAD_WORKERS,
+        )
     if spec.unpack is not None:
         spec.unpack(local_path)
 
     clips = sorted((local_path / spec.clip_dir).glob(spec.clip_glob))
     if not clips:
         raise SystemExit(f"No clips under {local_path / spec.clip_dir} (include={include}).")
-    motion, fps = spec.load(clips[0])
-    frames = motion["base_pos"].shape[0]
+    loaded = spec.load(clips[0])
+    if isinstance(loaded, HumanClip):
+        frames, fps = loaded.pos.shape[0], loaded.fps
+    else:
+        frames, fps = loaded[0]["base_pos"].shape[0], loaded[1]
     print(f"G1 model → {G1_URDF_PATH}")
     print(f"{source} → {local_path}")
     print(f"  clips  : {len(clips)}")

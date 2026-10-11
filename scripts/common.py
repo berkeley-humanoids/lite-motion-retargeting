@@ -1,4 +1,4 @@
-"""Shared helpers for the G1 → Lite retargeting pipeline.
+"""Shared helpers for the retargeting pipeline.
 
 Conventions:
 - Quaternions are scalar-first WXYZ, unit-norm, ``w >= 0``. A source file may store
@@ -9,6 +9,7 @@ Conventions:
 
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import mujoco
 import numpy as np
@@ -32,6 +33,11 @@ PUBLIC_SOURCE: str = "lafan1"
 SPACE_REPO_ID: str = "Berkeley-Humanoids/Lite-Motion-Dataset"
 
 CACHE_ROOT: Path = Path(__file__).resolve().parent.parent / ".cache"
+
+#: A foot of a source is planted while a point of it moves slower than this, in m/s,
+CONTACT_SPEED: float = 0.2
+#: and stands within this height of the floor, in metres.
+CONTACT_HEIGHT: float = 0.05
 
 #: The G1 model that every source was retargeted to. The LAFAN1 repo bundles it.
 G1_REPO_ID: str = "lvhaidong/LAFAN1_Retargeting_Dataset"
@@ -236,10 +242,7 @@ def resample_motion(
     if dst_fps == src_fps or frames < 2:
         return motion
 
-    t_src = np.arange(frames) / src_fps
-    t_dst = np.clip(
-        np.arange(round(t_src[-1] * dst_fps) + 1) / dst_fps, 0.0, t_src[-1]
-    )
+    t_src, t_dst = _resample_times(frames, src_fps, dst_fps)
     rotations = Slerp(
         t_src, Rotation.from_quat(motion["base_quat_wxyz"][:, [1, 2, 3, 0]])
     )
@@ -248,6 +251,29 @@ def resample_motion(
         "base_quat_wxyz": rotations(t_dst).as_quat().astype(np.float32)[:, [3, 0, 1, 2]],
         "g1_joint_pos": _interp(t_dst, t_src, motion["g1_joint_pos"]),
     }
+
+
+def resample_poses(
+    pos: np.ndarray, quat: np.ndarray, src_fps: int, dst_fps: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resample body poses ``(T, B, 3)`` and wxyz ``(T, B, 4)`` as :func:`resample_motion` does."""
+    frames = pos.shape[0]
+    if dst_fps == src_fps or frames < 2:
+        return pos, quat
+    t_src, t_dst = _resample_times(frames, src_fps, dst_fps)
+    pos_out = _interp(t_dst, t_src, pos.reshape(frames, -1)).reshape(len(t_dst), *pos.shape[1:])
+    quat_out = np.stack([
+        Slerp(t_src, Rotation.from_quat(quat[:, b][:, [1, 2, 3, 0]]))(t_dst).as_quat()[:, [3, 0, 1, 2]]
+        for b in range(quat.shape[1])
+    ], axis=1).astype(np.float32)
+    return pos_out, quat_out
+
+
+def _resample_times(frames: int, src_fps: int, dst_fps: int) -> tuple[np.ndarray, np.ndarray]:
+    """The sample times of the source, and the uniform output grid that spans them."""
+    t_src = np.arange(frames) / src_fps
+    t_dst = np.clip(np.arange(round(t_src[-1] * dst_fps) + 1) / dst_fps, 0.0, t_src[-1])
+    return t_src, t_dst
 
 
 def _interp(t_dst: np.ndarray, t_src: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -316,7 +342,50 @@ def world_poses(
     return pos, quat
 
 
-def sole_heights(
+class Sole(NamedTuple):
+    """The collision boxes of each foot, in the frame of its body, one entry per foot.
+
+    A geom is taken at the box MuJoCo bounds it with (``geom_aabb``), which is exact for a
+    box and a level capsule. The visual mesh is not a foot: it does not touch the floor in
+    simulation.
+    """
+
+    centers: list[np.ndarray]
+    rotations: list[np.ndarray]
+    halves: list[np.ndarray]
+
+
+def sole(model: mujoco.MjModel, foot_names: tuple[str, ...]) -> Sole:
+    """Measure the collision boxes of ``foot_names`` on ``model``."""
+    centers, rotations, halves = [], [], []
+    for name in foot_names:
+        foot = body_id(model, name)
+        geoms = [
+            g for g in range(model.ngeom)
+            if model.geom_bodyid[g] == foot and (model.geom_contype[g] or model.geom_conaffinity[g])
+        ]
+        rotation = Rotation.from_quat(model.geom_quat[geoms][:, [1, 2, 3, 0]]).as_matrix()
+        centers.append(model.geom_pos[geoms] + np.einsum("gij,gj->gi", rotation, model.geom_aabb[geoms, :3]))
+        rotations.append(rotation)
+        halves.append(model.geom_aabb[geoms, 3:])
+    return Sole(centers, rotations, halves)
+
+
+def lowest_points(foot_sole: Sole, foot_pos: np.ndarray, foot_rot: np.ndarray) -> np.ndarray:
+    """World position of the lowest point of each foot ``(T, F, 3)``, from the world pose
+    of its body: positions ``(T, F, 3)`` and rotation matrices ``(T, F, 3, 3)``."""
+    points = np.empty(foot_pos.shape, dtype=np.float32)
+    for f in range(foot_pos.shape[1]):
+        rotations = np.einsum("tij,gjk->tgik", foot_rot[:, f], foot_sole.rotations[f])
+        centers = foot_pos[:, f, None] + np.einsum("tij,gj->tgi", foot_rot[:, f], foot_sole.centers[f])
+        # A box reaches lowest at the corner whose every axis points down.
+        down = -np.sign(rotations[:, :, 2, :]) * foot_sole.halves[f]
+        lowest = centers + np.einsum("tgij,tgj->tgi", rotations, down)
+        points[:, f] = lowest[np.arange(len(lowest)), np.argmin(lowest[..., 2], axis=1)]
+    return points
+
+
+def sole_points(
     model: mujoco.MjModel,
     joint_addrs: np.ndarray,
     joint_pos: np.ndarray,
@@ -324,33 +393,24 @@ def sole_heights(
     base_quat: np.ndarray,
     foot_names: tuple[str, ...],
 ) -> np.ndarray:
-    """World height of the lowest point of ``foot_names``, per frame, ``(T,)``.
-
-    A foot is the collision geoms of its body, each taken at the box MuJoCo bounds it
-    with (``geom_aabb``), which is exact for a box. The visual mesh is not a foot: it
-    does not touch the floor in simulation.
+    """World position of the lowest point of each of ``foot_names``, per frame, ``(T, F, 3)``.
 
     The arguments are those of :func:`world_poses`.
     """
-    data = mujoco.MjData(model)
-    feet = {body_id(model, name) for name in foot_names}
-    geoms = [
-        g for g in range(model.ngeom)
-        if model.geom_bodyid[g] in feet and (model.geom_contype[g] or model.geom_conaffinity[g])
-    ]
-    centers, halves = model.geom_aabb[geoms, :3], model.geom_aabb[geoms, 3:]
-    # Row z of each base rotation: the world up axis, written in the pelvis frame.
-    ups = Rotation.from_quat(np.asarray(base_quat)[:, [1, 2, 3, 0]]).as_matrix()[:, 2]
+    pos, quat = world_poses(model, joint_addrs, joint_pos, base_pos, base_quat, foot_names)
+    rot = Rotation.from_quat(quat[:, 1:].reshape(-1, 4)[:, [1, 2, 3, 0]]).as_matrix()
+    return lowest_points(sole(model, foot_names), pos[:, 1:], rot.reshape(*pos[:, 1:].shape, 3))
 
-    heights = np.empty(joint_pos.shape[0], dtype=np.float32)
-    for t in range(joint_pos.shape[0]):
-        data.qpos[joint_addrs] = joint_pos[t]
-        mujoco.mj_kinematics(model, data)
-        rotations = data.geom_xmat[geoms].reshape(-1, 3, 3)
-        center = data.geom_xpos[geoms] + np.einsum("gij,gj->gi", rotations, centers)
-        # The up axis in each geom frame. A box reaches lowest along it by the sum of its
-        # half extents, each weighted by how far up its axis points.
-        up = ups[t] @ rotations
-        lowest = center @ ups[t] - np.sum(np.abs(up) * halves, axis=1)
-        heights[t] = base_pos[t, 2] + lowest.min()
-    return heights
+
+def planted(points: np.ndarray, fps: int) -> np.ndarray:
+    """Which feet of a source stand on the floor, per frame, ``(T, F)`` bool.
+
+    ``points`` ``(T, F, P, 3)`` are P points of each of F feet in world frame, such as the
+    ankle and the ball of the foot. A foot is planted while one of its points moves slower
+    than :data:`CONTACT_SPEED` and stands within :data:`CONTACT_HEIGHT` of the floor, which
+    is the lowest that point gets in the clip (its 5th percentile, so one bad frame does
+    not move it).
+    """
+    speed = np.linalg.norm(np.gradient(points, axis=0), axis=-1) * fps
+    near = points[..., 2] - np.percentile(points[..., 2], 5, axis=0) < CONTACT_HEIGHT
+    return np.any((speed < CONTACT_SPEED) & near, axis=-1)

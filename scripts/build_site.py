@@ -138,7 +138,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
             key: {
                 "title": SOURCES[key].title,
                 "license": SOURCES[key].license,
-                "url": f"https://huggingface.co/datasets/{SOURCES[key].repo_id}",
+                "url": SOURCES[key].page or f"https://huggingface.co/datasets/{SOURCES[key].repo_id}",
                 # The Hub repo holds this source alone, so only its motions have a URL the
                 # web viewer can open.
                 "hub": f"{HUB_FILES}{robot}/" if key == PUBLIC_SOURCE else None,

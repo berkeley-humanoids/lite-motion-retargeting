@@ -94,9 +94,10 @@ def write_base_layer(
     """Write ``base/<name>.rrd``: the source clip as published, at its own rate.
 
     This layer keeps the source inside the store, so a motion can be derived again
-    without the upstream dataset. It holds the joints of the source robot and the world
-    poses they put its bodies at, in that robot's own frame convention, so nothing here
-    is directly comparable to a robot layer.
+    without the upstream dataset. It holds the joints of a source robot, and the world
+    poses of the bodies of the source, robot or human, in its own frame convention, so
+    nothing here is directly comparable to a robot layer. A human source has no joint
+    angles to keep, and ``joint_names`` is empty.
 
     ``body_pos`` is ``(T, NB, 3)`` and ``body_quat`` ``(T, NB, 4)`` wxyz, both world.
     """
@@ -108,7 +109,8 @@ def write_base_layer(
         stream.send_property("motion", rr.AnyValues(
             fps=fps, joint_names=list(joint_names), body_names=list(body_names)
         ))
-        _send_joints(stream, BASE_LAYER, fps, joint_names, joint_pos)
+        if joint_names:
+            _send_joints(stream, BASE_LAYER, fps, joint_names, joint_pos)
         _send_bodies(stream, f"{BASE_LAYER}/body", fps, body_names, body_pos, body_quat)
     return path
 
@@ -125,6 +127,7 @@ def write_robot_layer(
     body_pos: np.ndarray,
     body_quat: np.ndarray,
     geometry: bool,
+    metrics: dict[str, float],
 ) -> Path:
     """Write ``<robot>/<name>.rrd``: everything one robot needs for one motion.
 
@@ -141,8 +144,11 @@ def write_robot_layer(
     two rigs need not share a vocabulary.
 
     ``body_names`` must contain the root link of the URDF, whose goal places the robot.
-    The solve does not move the root: its goal is the base trajectory the retarget was
-    given, so the goal and the reached pose are the same pose for that one body.
+    Its goal is the base trajectory of the retarget, so the goal and the reached pose are
+    the same pose for that one body.
+
+    ``metrics`` are the quality numbers of ``retarget.motion_metrics``, kept as the
+    ``metrics`` property so a motion carries how well it was made.
     """
     robot = _robot_name(urdf_path)
     tree = rr.urdf.UrdfTree.from_file_path(
@@ -165,6 +171,7 @@ def write_robot_layer(
             body_names=list(body_names),
             source_body_names=list(source_body_names),
         ))
+        stream.send_property("metrics", rr.AnyValues(**metrics))
         if geometry:
             tree.log_urdf_to_recording(recording=stream)
         _send_joints(stream, robot, fps, joint_names, joint_pos)

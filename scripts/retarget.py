@@ -1,15 +1,26 @@
-"""Retarget G1 motions to the Berkeley Lite humanoid.
+"""Retarget motion to the Berkeley Lite humanoid.
 
-Pipeline per clip, after the source is resampled to the output rate:
+A source is either human motion, such as the LAFAN1 BVH takes, or motion that its
+authors already retargeted to the 29-DoF Unitree G1. The loader of the source decides
+which path a clip takes, after the source is resampled to the output rate:
 
-* **Step 1** — direct joint copy ``lite_q = sign * g1_q + offset`` using the
+* **Human** — ``mapping.goals`` poses a skeleton with the proportions of Lite and the
+  joint rotations of the human, and ``mapping.solve_ik`` reaches it frame by frame with a
+  floating base.
+* **G1, step 1** — direct joint copy ``lite_q = sign * g1_q + offset`` using the
   static :data:`common.G1_TO_LITE` table.
-* **Step 2** — per-frame ``mink`` IK that refines step 1 to match G1's
+* **G1, step 2** — per-frame ``mink`` IK that refines step 1 to match G1's
   pelvis-local EE poses (feet + hands, position + orientation). The
   per-DOF posture cost biases the solution toward step 1 so the refinement
   is a *tweak*, not a rearrangement.
+
+Both paths then share:
+
 * **Grounding** — a constant pelvis-z shift per clip that puts the lowest point of
   Lite's soles on the floor in the median frame.
+* **Metrics** — how far each goal is from the link that tracks it, how fast a foot on the
+  floor slides, how deep a sole sinks into the floor, and the fastest joint. The robot
+  layer keeps them, and a run prints their mean.
 
 One clip becomes two layers of one motion in ``dataset/``: ``base/``, the source clip
 as published at its own rate, and ``lite_pro/``, at the 50 Hz control rate, holding the
@@ -19,8 +30,8 @@ joints the IK reached and the goal it aimed at. ``scripts/sources.py`` lists the
 Usage:
     uv run scripts/retarget.py
     uv run scripts/retarget.py --clip 'walk1_subject1'
+    uv run scripts/retarget.py --source lafan1bvh --clip 'walk1_subject1' --validate-only
     uv run scripts/retarget.py --source amass --clip '^CMU/'
-    uv run scripts/retarget.py --validate-only
     uv run scripts/retarget.py --workers -1          # every clip, every core
 """
 
@@ -34,6 +45,7 @@ from typing import NamedTuple
 import mujoco
 import numpy as np
 import tyro
+from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,22 +64,29 @@ from common import (  # noqa: E402
     lite_urdf_path,
     load_g1_model,
     load_lite_model,
+    planted,
     quat_mul,
     resample_motion,
-    sole_heights,
+    resample_poses,
+    sole,
+    sole_points,
     world_poses,
+)
+from human import HUMAN_BODIES, HumanClip  # noqa: E402
+from mapping import (  # noqa: E402
+    FEET,
+    LITE_PAIRS,
+    calibrate,
+    goals,
+    load_floating_model,
+    plant,
+    solve_ik,
 )
 from sources import SOURCES, clip_key, motion_name  # noqa: E402
 from store import write_asset, write_base_layer, write_blueprint, write_robot_layer  # noqa: E402
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 DATASET_ROOT: Path = REPO_ROOT / "dataset"
-
-#: The Lite bodies that stand on the floor.
-FEET: tuple[str, ...] = ("left_foot", "right_foot")
-
-# Validation frame stride for the EE-error summary.
-SAMPLE_STRIDE: int = 50
 
 # Clips a worker retargets before a fresh process replaces it. rerun 0.38 keeps two threads
 # alive for every recording it ever opened, and a motion opens two, so a worker that wrote
@@ -247,7 +266,7 @@ def step2_ik_refine(
     return out
 
 
-# ── Step 3: grounding ─────────────────────────────────────────────────────────
+# ── Grounding ─────────────────────────────────────────────────────────────────
 
 
 def ground_height(
@@ -265,85 +284,69 @@ def ground_height(
     frame would let one sole that dips through the floor lift the whole clip, and a
     foot stands on the floor in most frames of a clip.
     """
-    heights = sole_heights(lite_model, lite_joint_addrs, joint_pos, base_pos, base_quat, FEET)
-    return -float(np.median(heights))
+    soles = sole_points(lite_model, lite_joint_addrs, joint_pos, base_pos, base_quat, FEET)
+    return -float(np.median(soles[:, :, 2].min(axis=1)))
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+# ── Metrics ───────────────────────────────────────────────────────────────────
 
 
-def _rotation_angle_error(R_a: np.ndarray, R_b: np.ndarray) -> float:
-    cos_theta = np.clip((np.trace(R_a @ R_b.T) - 1.0) * 0.5, -1.0, 1.0)
-    return float(np.arccos(cos_theta))
+def motion_metrics(
+    models: "Models",
+    base_pos: np.ndarray,
+    base_quat: np.ndarray,
+    joint_pos: np.ndarray,
+    goal_links: tuple[str, ...],
+    goal_pos: np.ndarray,
+    goal_quat: np.ndarray,
+    feet_planted: np.ndarray,
+) -> dict[str, float]:
+    """How well a retargeted motion tracks its goals, and how it treats the floor.
 
+    ``feet_planted`` ``(T, 2)`` says which of :data:`mapping.FEET` the source stands on.
 
-def validate_ee_tracking(
-    motion: dict[str, np.ndarray],
-    lite_joint_pos: np.ndarray,
-    g1_model: mujoco.MjModel,
-    lite_model: mujoco.MjModel,
-    lite_joint_addrs: np.ndarray,
-) -> None:
-    """Print per-EE position + rotation error vs. G1 at every SAMPLE_STRIDE frames.
-
-    Rotation error is measured as the angle of "motion delta from matched
-    rest" — each robot's EE rotation relative to its own matched rest.
-    Lite's matched rest is step 1 applied at G1 ``q = 0`` (arms at offsets).
+    * ``foot_error_cm``, ``hand_error_cm``: mean distance from a goal to its link.
+    * ``foot_angle_deg``, ``hand_angle_deg``: mean angle between a goal and its link.
+    * ``foot_slide_cm_s``: mean horizontal speed of the lowest sole point, taken as a point
+      of the foot, while the source stands on that foot in two frames in a row. A foot that
+      rolls over its sole does not slide.
+    * ``planted_gap_cm``: mean distance from the lowest sole point to the floor, while the
+      source stands on that foot.
+    * ``penetration_cm``: the 95th percentile, over frames, of the deepest sole point below
+      the floor.
+    * ``joint_speed_max``: the fastest any joint turns between two frames, rad/s. An IK
+      that flips a limb shows here.
     """
-    g1_data = mujoco.MjData(g1_model)
-    lite_data = mujoco.MjData(lite_model)
-    g1_addrs = np.asarray(
-        [joint_qpos_addr(g1_model, n) for n in G1_JOINT_NAMES], dtype=np.int32
+    links = goal_links[1:]
+    reached_pos, reached_quat = world_poses(
+        models.lite, models.joint_addrs, joint_pos, base_pos, base_quat, links
     )
+    error = np.linalg.norm(reached_pos[:, 1:] - goal_pos[:, 1:], axis=-1) * 100.0
+    dot = np.abs(np.sum(reached_quat[:, 1:] * goal_quat[:, 1:], axis=-1))
+    angle = np.degrees(2.0 * np.arccos(np.clip(dot, 0.0, 1.0)))
+    feet = [links.index(link) for link in FEET]
+    hands = [links.index(link) for link in ("left_hand", "right_hand")]
 
-    mujoco.mj_kinematics(g1_model, g1_data)
-    rest_g1 = {
-        name: g1_data.xmat[body_id(g1_model, name)].reshape(3, 3).copy()
-        for name in IK_BODY_PAIRS.values()
+    soles = sole_points(models.lite, models.joint_addrs, joint_pos, base_pos, base_quat, FEET)
+    both = feet_planted[1:] & feet_planted[:-1]
+    foot_pos = reached_pos[:, [1 + f for f in feet]]
+    foot_rot = Rotation.from_quat(reached_quat[:, [1 + f for f in feet]].reshape(-1, 4)[:, [1, 2, 3, 0]])
+    foot_rot = foot_rot.as_matrix().reshape(*foot_pos.shape[:2], 3, 3)
+    # Where the touching point of frame t is one frame later.
+    local = np.einsum("tfji,tfj->tfi", foot_rot[:-1], soles[:-1] - foot_pos[:-1])
+    moved = foot_pos[1:] + np.einsum("tfij,tfj->tfi", foot_rot[1:], local)
+    speed = np.linalg.norm(moved[..., :2] - soles[:-1, :, :2], axis=-1) * FPS * 100.0
+    depth = np.maximum(-soles[:, :, 2].min(axis=1), 0.0) * 100.0
+    return {
+        "foot_error_cm": float(error[:, feet].mean()),
+        "foot_angle_deg": float(angle[:, feet].mean()),
+        "hand_error_cm": float(error[:, hands].mean()),
+        "hand_angle_deg": float(angle[:, hands].mean()),
+        "foot_slide_cm_s": float(speed[both].mean()) if both.any() else 0.0,
+        "planted_gap_cm": float(np.abs(soles[..., 2][feet_planted]).mean() * 100.0) if feet_planted.any() else 0.0,
+        "penetration_cm": float(np.percentile(depth, 95)),
+        "joint_speed_max": float(np.abs(np.diff(joint_pos, axis=0)).max() * FPS),
     }
-
-    matched_rest = np.zeros(lite_model.nq, dtype=np.float64)
-    for _, (lite_name, _, offset) in G1_TO_LITE.items():
-        matched_rest[joint_qpos_addr(lite_model, lite_name)] = offset
-    lite_data.qpos[:] = matched_rest
-    mujoco.mj_kinematics(lite_model, lite_data)
-    rest_lite = {
-        name: lite_data.xmat[body_id(lite_model, name)].reshape(3, 3).copy()
-        for name in IK_BODY_PAIRS
-    }
-
-    frames = lite_joint_pos.shape[0]
-    indices = list(range(0, frames, SAMPLE_STRIDE))
-    stats: dict[str, dict[str, list[float]]] = {
-        name: {"pos": [], "rot": []} for name in IK_BODY_PAIRS
-    }
-
-    for t in indices:
-        lite_data.qpos[lite_joint_addrs] = lite_joint_pos[t]
-        mujoco.mj_kinematics(lite_model, lite_data)
-        g1_data.qpos[g1_addrs] = motion["g1_joint_pos"][t]
-        mujoco.mj_kinematics(g1_model, g1_data)
-        for lite_name, g1_name in IK_BODY_PAIRS.items():
-            lite_body = body_id(lite_model, lite_name)
-            g1_body = body_id(g1_model, g1_name)
-            stats[lite_name]["pos"].append(
-                float(np.linalg.norm(lite_data.xpos[lite_body] - g1_data.xpos[g1_body]))
-            )
-            R_lite = lite_data.xmat[lite_body].reshape(3, 3) @ rest_lite[lite_name].T
-            R_g1 = g1_data.xmat[g1_body].reshape(3, 3) @ rest_g1[g1_name].T
-            stats[lite_name]["rot"].append(_rotation_angle_error(R_lite, R_g1))
-
-    print(f"\nEE tracking error across {len(indices)} frames "
-          f"(stride={SAMPLE_STRIDE}, total={frames}):")
-    print(f"  {'body':<14s} {'pos mean':>9s} {'pos max':>9s}   "
-          f"{'rot mean':>9s} {'rot max':>9s}")
-    for lite_name in IK_BODY_PAIRS:
-        pos = np.asarray(stats[lite_name]["pos"])
-        rot = np.asarray(stats[lite_name]["rot"])
-        print(
-            f"  {lite_name:<14s} {pos.mean():>8.3f}m {pos.max():>8.3f}m   "
-            f"{np.degrees(rot.mean()):>7.2f}° {np.degrees(rot.max()):>7.2f}°"
-        )
 
 
 # ── The models, compiled once per process ─────────────────────────────────────
@@ -354,6 +357,7 @@ class Models(NamedTuple):
 
     g1: mujoco.MjModel
     lite: mujoco.MjModel
+    floating: mujoco.MjModel
     g1_addrs: np.ndarray
     joint_addrs: np.ndarray
     joint_names: tuple[str, ...]
@@ -361,13 +365,14 @@ class Models(NamedTuple):
 
 
 def load_models() -> Models:
-    """Compile both robots."""
+    """Compile both robots, and Lite again with a free base for the human IK."""
     g1 = load_g1_model()
     lite = load_lite_model()
     names = lite_joint_names(lite)
     return Models(
         g1=g1,
         lite=lite,
+        floating=load_floating_model(),
         g1_addrs=np.asarray(
             [joint_qpos_addr(g1, n) for n in G1_JOINT_NAMES], dtype=np.int32
         ),
@@ -407,17 +412,23 @@ def _goal_conversions(
 class Clip(NamedTuple):
     """One retargeted clip: the arrays the two layers of its motion are written from.
 
-    The ``source_*`` arrays are the clip as published, at ``source_fps``. The rest are
-    the retarget, at :data:`FPS`.
+    The ``source_*`` arrays are the clip as published, at ``source_fps``: the joints of the
+    source, if it has joint angles to keep, and the world pose of its bodies. The rest are
+    the retarget, at :data:`FPS`. ``goal_sources`` names the source body each goal follows.
     """
 
     source_fps: int
+    source_joint_names: tuple[str, ...]
     source_joint_pos: np.ndarray
+    source_bodies: tuple[str, ...]
     source_pos: np.ndarray
     source_quat: np.ndarray
     joint_pos: np.ndarray
+    goal_links: tuple[str, ...]
+    goal_sources: tuple[str, ...]
     goal_pos: np.ndarray
     goal_quat: np.ndarray
+    metrics: dict[str, float]
 
 
 def retarget_clip(
@@ -430,12 +441,16 @@ def retarget_clip(
 ) -> Clip:
     """Run every step on one clip of ``source``, and pose the bodies each layer carries.
 
-    The base layer keeps the source untouched, at its own rate and in the frame
-    convention of the G1. The robot layer carries the goal, which is the same G1 pose
-    turned into the convention of the Lite link it drives, so it compares directly
-    against that link.
+    The base layer keeps the source untouched, at its own rate and in its own frame
+    convention. The robot layer carries the goal of each link, in the convention of that
+    link, so it compares directly against it. The goal of the root is where the retarget
+    put the base, so the robot and its goals share one root.
     """
-    clip, source_fps = SOURCES[source].load(Path(path))
+    loaded = SOURCES[source].load(Path(path))
+    if isinstance(loaded, HumanClip):
+        return _retarget_human(models, loaded, ik_iters)
+
+    clip, source_fps = loaded
     source_pos, source_quat = world_poses(
         models.g1, models.g1_addrs, clip["g1_joint_pos"],
         clip["base_pos"], clip["base_quat_wxyz"], tuple(IK_BODY_PAIRS.values()),
@@ -459,9 +474,40 @@ def retarget_clip(
         models.g1, models.g1_addrs, motion["g1_joint_pos"],
         base_pos, base_quat, tuple(IK_BODY_PAIRS.values()),
     )
+    goal_quat = quat_mul(goal_quat, models.goal_conv).astype(np.float32)
+    feet = [ROBOT_BODIES.index(foot) for foot in FEET]
+    feet_planted = planted(goal_pos[:, feet, None], FPS)
     return Clip(
-        source_fps, clip["g1_joint_pos"], source_pos, source_quat,
-        joint_pos, goal_pos, quat_mul(goal_quat, models.goal_conv).astype(np.float32),
+        source_fps, G1_JOINT_NAMES, clip["g1_joint_pos"], SOURCE_BODIES, source_pos, source_quat,
+        joint_pos, ROBOT_BODIES, SOURCE_BODIES, goal_pos, goal_quat,
+        motion_metrics(models, base_pos, base_quat, joint_pos, ROBOT_BODIES, goal_pos, goal_quat, feet_planted),
+    )
+
+
+def _retarget_human(models: Models, clip: HumanClip, ik_iters: int) -> Clip:
+    """Retarget one human clip: goals from ``mapping``, then the floating-base IK."""
+    pos, quat = resample_poses(clip.pos, clip.quat, clip.fps, FPS)
+    foot_points = [[HUMAN_BODIES.index(f"{side}_{point}") for point in ("foot", "toe")] for side in ("left", "right")]
+    feet_planted = planted(pos[:, foot_points], FPS)
+    goal_pos, goal_quat = goals(pos, quat, calibrate(models.lite, clip.rest))
+    goal_pos = plant(goal_pos, goal_quat, feet_planted, sole(models.lite, FEET))
+    base_pos, base_quat, joint_pos = solve_ik(
+        models.floating, models.joint_names, goal_pos, goal_quat, ik_iters
+    )
+
+    # The planted goals stand on the floor, and the IK leaves the soles within a few
+    # millimetres of them, so grounding barely moves the robot, and moves the goals with it.
+    shift = ground_height(models.lite, models.joint_addrs, joint_pos, base_pos, base_quat)
+    base_pos[:, 2] += shift
+    goal_pos[:, :, 2] += shift
+
+    goal_pos[:, 0], goal_quat[:, 0] = base_pos, base_quat
+    links = tuple(LITE_PAIRS)
+    return Clip(
+        clip.fps, (), np.zeros((clip.pos.shape[0], 0), dtype=np.float32),
+        clip.source_bodies, clip.source_pos, clip.source_quat,
+        joint_pos, links, tuple(pair.human for pair in LITE_PAIRS.values()), goal_pos, goal_quat,
+        motion_metrics(models, base_pos, base_quat, joint_pos, links, goal_pos, goal_quat, feet_planted),
     )
 
 
@@ -474,22 +520,25 @@ def _worker_init() -> None:
     _MODELS = load_models()
 
 
-def write_motion(models: Models, name: str, clip: Clip, urdf: Path, geometry: bool) -> list[Path]:
-    """Write the base and the robot layer of one motion under ``DATASET_ROOT``."""
+def write_motion(models: Models, name: str, clip: Clip, urdf: Path, geometry: bool, out: Path) -> list[Path]:
+    """Write the base and the robot layer of one motion under ``out``."""
     return [
         write_base_layer(
-            DATASET_ROOT, name, clip.source_fps, G1_JOINT_NAMES,
-            clip.source_joint_pos, SOURCE_BODIES, clip.source_pos, clip.source_quat,
+            out, name, clip.source_fps, clip.source_joint_names,
+            clip.source_joint_pos, clip.source_bodies, clip.source_pos, clip.source_quat,
         ),
         write_robot_layer(
-            DATASET_ROOT, name, urdf, FPS, models.joint_names, clip.joint_pos,
-            ROBOT_BODIES, SOURCE_BODIES, clip.goal_pos, clip.goal_quat, geometry,
+            out, name, urdf, FPS, models.joint_names, clip.joint_pos,
+            clip.goal_links, clip.goal_sources, clip.goal_pos, clip.goal_quat, geometry,
+            clip.metrics,
         ),
     ]
 
 
-def _worker_retarget(job: tuple[str, str, str, bool, int, str, bool]) -> tuple[list[str], str | None]:
-    """Retarget one clip in a worker, write its layers, and return their paths.
+def _worker_retarget(
+    job: tuple[str, str, str, bool, int, str, bool, str],
+) -> tuple[list[str], dict[str, float], str | None]:
+    """Retarget one clip in a worker, write its layers, and return their paths and metrics.
 
     A motion has files of its own, so no two workers write one file, and writing here
     keeps the parent from being the bottleneck: a short clip takes longer to write than
@@ -497,13 +546,20 @@ def _worker_retarget(job: tuple[str, str, str, bool, int, str, bool]) -> tuple[l
     bad file among thousands does not stop the rest.
     """
     assert _MODELS is not None
-    source, path, name, ik, ik_iters, urdf, geometry = job
+    source, path, name, ik, ik_iters, urdf, geometry, out = job
     try:
         clip = retarget_clip(_MODELS, source, path, ik, ik_iters, show_progress=False)
-        written = write_motion(_MODELS, name, clip, Path(urdf), geometry)
+        written = write_motion(_MODELS, name, clip, Path(urdf), geometry, Path(out))
     except Exception as error:  # noqa: BLE001 -- the parent lists every failed clip
-        return [], f"{path}: {type(error).__name__}: {error}"
-    return [str(path) for path in written], None
+        return [], {}, f"{path}: {type(error).__name__}: {error}"
+    return [str(path) for path in written], clip.metrics, None
+
+
+def print_metrics(rows: list[dict[str, float]]) -> None:
+    """Print the mean of each metric over ``rows``, one clip per row."""
+    print(f"\nMetrics, mean over {len(rows)} clips:")
+    for key in rows[0]:
+        print(f"  {key:<16s} {np.mean([row[key] for row in rows]):8.2f}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -516,18 +572,21 @@ def main(
     ik_iters: int = 15,
     workers: int = 1,
     validate_only: bool = False,
+    out: Path = DATASET_ROOT,
 ) -> None:
-    """Retarget the G1 clips of a source to Lite, and write the two layers of each motion.
+    """Retarget the clips of a source to Lite, and write the two layers of each motion.
 
     Args:
         source: One of the keys of ``sources.SOURCES``.
         clip: A regex. Retarget the clips whose path below the clip directory of the
             source matches it, as in ``CMU/07/07_01_poses_120_jpos`` for AMASS.
-        ik: Refine step 1 with the step-2 IK. Set False to keep step 1 only.
-        ik_iters: Newton steps per frame in step 2.
+        ik: Refine step 1 of a G1 source with the step-2 IK. Set False to keep step 1
+            only. A human source always takes its IK.
+        ik_iters: Newton steps per frame of either IK.
         workers: Processes to retarget clips in parallel. ``-1`` uses every core.
-        validate_only: Retarget the first matching clip, print the end-effector
-            error table, and write nothing.
+        validate_only: Retarget the first matching clip, print its metrics, and write
+            nothing.
+        out: The store to write. Another directory keeps two runs apart, to compare them.
     """
     if source not in SOURCES:
         raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")
@@ -558,38 +617,25 @@ def main(
     print(f"  {len(paths)} clips of {source}, resampled to {FPS} Hz")
 
     if validate_only:
-        clip_motion, source_fps = spec.load(paths[0])
-        motion = resample_motion(clip_motion, source_fps, FPS)
-        step1 = step1_direct_remap(motion, models.joint_addrs, models.lite)
-        print(f"\nClip: {paths[0].name} ({step1['joint_pos'].shape[0]} frames, "
-              f"{source_fps} Hz source)")
-        print("\n=== Step 1 (direct copy with sign + offset) ===")
-        validate_ee_tracking(
-            motion, step1["joint_pos"], models.g1, models.lite, models.joint_addrs
-        )
-        if ik:
-            step2 = step2_ik_refine(
-                motion, step1["joint_pos"], models.g1, models.lite, models.joint_addrs,
-                iters=ik_iters,
-            )
-            print("\n=== Step 1 + Step 2 (per-frame IK refinement) ===")
-            validate_ee_tracking(
-                motion, step2, models.g1, models.lite, models.joint_addrs
-            )
+        result = retarget_clip(models, source, str(paths[0]), ik, ik_iters)
+        print(f"\nClip: {paths[0].name} ({result.joint_pos.shape[0]} frames at {FPS} Hz, "
+              f"from {result.source_fps} Hz)")
+        print_metrics([result.metrics])
         return
 
     urdf = lite_urdf_path()
-    blueprint = write_blueprint(DATASET_ROOT, urdf)
-    asset = write_asset(DATASET_ROOT, urdf)
+    blueprint = write_blueprint(out, urdf)
+    asset = write_asset(out, urdf)
     written = [blueprint, asset]
     # The Hub card links each published motion into the web viewer, which cannot load the
     # asset, so a published motion carries its own geometry.
     geometry = source == PUBLIC_SOURCE
 
     failed = []
+    metrics = []
     if workers > 1:
         jobs = [
-            (source, str(path), name, ik, ik_iters, str(urdf), geometry)
+            (source, str(path), name, ik, ik_iters, str(urdf), geometry, str(out))
             for path, name in zip(paths, names, strict=True)
         ]
         # Spawn, not fork: the parent runs threads by now, and a forked child can inherit a
@@ -597,12 +643,14 @@ def main(
         # once many jobs are queued (CPython 3.13), so this uses multiprocessing.Pool.
         with get_context("spawn").Pool(workers, _worker_init, maxtasksperchild=WORKER_CLIPS) as pool:
             results = pool.imap(_worker_retarget, jobs)
-            for files, error in tqdm(
+            for files, clip_metrics, error in tqdm(
                 results, total=len(jobs), desc=f"Clips (workers={workers})", unit="clip"
             ):
                 written += [Path(path) for path in files]
                 if error is not None:
                     failed.append(error)
+                else:
+                    metrics.append(clip_metrics)
         if failed:
             print(f"\n{len(failed)} of {len(jobs)} clips failed and were skipped:")
             for error in failed:
@@ -611,13 +659,16 @@ def main(
         for path, name in tqdm(zip(paths, names, strict=True), total=len(names), desc="Clips",
                                unit="clip"):
             result = retarget_clip(models, source, str(path), ik, ik_iters)
-            written += write_motion(models, name, result, urdf, geometry)
+            written += write_motion(models, name, result, urdf, geometry, out)
+            metrics.append(result.metrics)
 
+    if metrics:
+        print_metrics(metrics)
     total_mb = sum(path.stat().st_size for path in written) / 1e6
     print(f"\nWrote {len(names) - len(failed)} motions as {len(written)} files "
-          f"({total_mb:.1f} MB) under {DATASET_ROOT}")
+          f"({total_mb:.1f} MB) under {out}")
     # The blueprint goes last: blueprints do not merge, and the last one loaded wins.
-    print(f"  view: uv run rerun {DATASET_ROOT}/*/{names[0]}.rrd --asset {asset} {blueprint}")
+    print(f"  view: uv run rerun {out}/*/{names[0]}.rrd --asset {asset} {blueprint}")
 
 
 if __name__ == "__main__":

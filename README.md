@@ -1,8 +1,8 @@
 # Lite Motion Retargeting
 
-Retargets motion capture sets from the Unitree G1 to the Berkeley Lite humanoid. Each
-source is already retargeted to the 29-DoF G1 by its authors. One clip becomes one
-layered [Rerun](https://rerun.io) motion. The LAFAN1 motions are published in
+Retargets motion capture sets to the Berkeley Lite humanoid. A source is either the
+original human motion, or motion that its authors already retargeted to the 29-DoF
+Unitree G1. One clip becomes one layered [Rerun](https://rerun.io) motion. The LAFAN1 motions are published in
 [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset], which you can
 [open in a browser][viewer] or browse in the [Lite Motion Dataset][space] Space.
 
@@ -10,6 +10,7 @@ layered [Rerun](https://rerun.io) motion. The LAFAN1 motions are published in
 
 | Source | Clips | Rate | Size | License | On the Hub |
 |---|---|---|---|---|---|
+| `lafan1bvh`: [LAFAN1 BVH][lafan1bvh], human | 77 | 30 Hz | 0.35 GB | CC BY-NC-ND 4.0 | No |
 | `lafan1`: [LAFAN1][lafan1] | 40 | 30 Hz | 0.3 GB | CC BY-NC-ND 4.0 | Yes |
 | `amass`: [AMASS][amass], all subsets | 17,717 | 60 to 250 Hz | 7 GB | AMASS: non-commercial research, no redistribution | No |
 | `motiondecode`: [ChingMu MotionDecode][motiondecode] | 92,559 | 120 Hz | 148 GB | ChingMu: non-commercial research, not to be hosted as a competing dataset | No |
@@ -20,6 +21,12 @@ layered [Rerun](https://rerun.io) motion. The LAFAN1 motions are published in
 `scripts/sources.py` defines each source and its loader. The motions of `amass` and
 `motiondecode` stay in your local `dataset/`, for training. `publish.py` uploads only
 `lafan1`.
+
+`lafan1bvh` is the human motion that `lafan1` was retargeted from: the BVH takes of
+Ubisoft's LAFAN1, which come as a zip on GitHub, not on the Hub. Its 40 takes that `lafan1`
+also holds have the same names and frames, so the two paths compare clip for clip. The
+other sources ship G1 motion only. The raw AMASS takes need an MPI account, MotionDecode
+gives its BVH files on request, and Kimodo generated its clips on the G1 directly.
 
 `kimodo` is not motion capture. NVIDIA's Kimodo model generated each clip from a text
 prompt, such as "a person throwing boxing punches", and a tracking policy played it on a
@@ -54,6 +61,9 @@ uv run rerun dataset/*/amass_CMU_07_07_01_poses_120_jpos.rrd \
 uv run scripts/download.py --source motiondecode \
     --include 'samples/1.3.Basic_Gait_Category/**' 'samples/5.Dance/**'
 uv run scripts/retarget.py --source motiondecode --workers -1
+
+uv run scripts/download.py --source lafan1bvh
+uv run scripts/retarget.py --source lafan1bvh --clip '^walk1_subject1$' --validate-only
 ```
 
 To write to the Hub, run `hf auth login` or set `HF_TOKEN`.
@@ -100,17 +110,19 @@ token of their account, so a private repo shows only to those who can read it.
 | Script | What it does |
 |---|---|
 | `download.py` | Downloads the G1 model into `.cache/g1/`, and a source into `.cache/<source>/`. |
-| `retarget.py` | Retargets each clip and writes its two layers under `dataset/`. |
+| `retarget.py` | Retargets each clip, measures it, and writes its two layers under `dataset/`. |
 | `sources.py` | The sources, the loader that reads a clip of each, and how a motion is named. |
+| `human.py` | The human skeleton that every human source maps onto, and the LAFAN1 BVH reader. |
+| `mapping.py` | The goal of each Lite link from a human pose, the foot planting, and the IK that reaches the goals. |
 | `store.py` | Defines the file format. |
 | `publish.py` | Fills the motion index of `DATASET_CARD.md`, uploads it with the store and the browser data, then the page to the Space. |
 | `build_site.py` | Writes the motions and the robot meshes that `site/` plays into `site/data/`. |
 | `serve.py` | Serves `site/` on this machine, with range requests. |
-| `common.py` | The joint table, the model loaders, resampling, and forward kinematics. |
+| `common.py` | The G1 joint table, the model loaders, resampling, forward kinematics, the soles, and foot contacts. |
 
 `retarget.py` takes `--source <name>`, `--clip <regex>`, `--no-ik`, `--ik-iters N`,
-`--workers N`, and `--validate-only`, which prints the end-effector error table and
-writes nothing. The regex matches the path of a clip below the clip directory of its
+`--workers N`, `--out <dir>`, which writes the store to another directory, and
+`--validate-only`, which prints the metrics of the first clip and writes nothing. The regex matches the path of a clip below the clip directory of its
 source, without the suffix, such as `CMU/07/07_01_poses_120_jpos`. A motion is named
 after the same path: `amass_CMU_07_07_01_poses_120_jpos`.
 `publish.py` takes `--dry-run`, `--repo-id <id>`, `--space-id <id>`, and `--clear`,
@@ -118,13 +130,15 @@ which deletes every file in the Hub repo that this store does not replace.
 
 ### Cost
 
-The IK solves about 500 frames per second on one core. A robot layer holds 12 to 16 MB
+The G1 IK solves about 500 frames per second on one core, and the human IK about 100. A
+robot layer holds 12 to 16 MB
 for each minute of motion. A base layer keeps the source rate, so it adds 10 to 60 percent
 to that. These are the measured totals:
 
 | Source | Motions | Hours | Store | `site/data` |
 |---|---|---|---|---|
 | `lafan1` | 40 | 2.5 | 2.6 GB | 0.07 GB |
+| `lafan1bvh` | 77 | 4.6 | 6.0 GB | |
 | `amass`, all subsets | 17,717 | 59 | 66 GB | 2.0 GB |
 | `motiondecode` | 92,558 | 991 | 1,146 GB | 29.9 GB |
 | `kimodo` | 9,490 | 10 | 11 GB | 0.3 GB |
@@ -144,19 +158,75 @@ so a `lafan1` motion, which the Hub card opens in the web viewer, carries its ow
 A source is 30 to 250 Hz, and a motion is written at 50 Hz, the control rate of the
 training environment. `retarget.py` resamples the source before it does anything
 else, so the IK solves every frame that reaches the file, and the body poses stay
-the exact kinematics of the joints beside them.
+the exact kinematics of the joints beside them. The loader of the source decides which
+of two paths a clip takes.
+
+### A human clip
+
+1. **One skeleton.** `human.py` reads the clip into the world poses of one human
+   skeleton, after the keypoints of the Lite conventions: pelvis, hips, knees, feet,
+   toes, waist, chest, neck, head, shoulders, elbows and hands. A rotation is
+   rest-normalized: it is identity when the body is as in a T-pose that faces +x. A new
+   format thus needs a reader and nothing else.
+2. **Goals.** `mapping.goals` builds a skeleton with the proportions of Lite and the
+   joint rotations of the human. The pelvis follows the human pelvis, scaled by the
+   ratio of the two pelvis heights. Every other joint hangs off the joint above it by
+   the Lite segment between them, turned as the human segment turns. Each Lite link in
+   `mapping.LITE_PAIRS` gets a goal pose: the pelvis, thighs, shins, feet, chest, head,
+   upper arms, forearms and hands.
+3. **Foot planting.** A skeleton with other proportions does not step where the human
+   steps. `common.planted` finds the frames where a human foot stands on the floor, from
+   the speed and height of its ankle and toe. `mapping.plant` then shifts the goal
+   skeleton, frame by frame, so that a planted foot keeps its sole point in place and
+   on the floor. It also lifts a foot whose sole would dip through the floor.
+4. **IK.** Per-frame [`mink`](https://github.com/kevinzakka/mink) IK with a free base
+   moves Lite onto the goals, position and orientation, from the frame before. The
+   thigh, shin, upper arm and forearm goals pin the twist of each limb. Without them, the
+   IK drifted along a joint limit onto another branch of the hip, then snapped back in one
+   frame. No joint turns faster than 20 rad/s. The limit binds where an arm passes the
+   T-pose, in which the shoulder pitch and yaw of Lite share an axis.
+
+The goals are the part that a backend shares. A physics backend, such as an RL policy
+that tracks them in simulation, can take the same goals in place of the IK.
+
+### A G1 clip
 
 1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
    `common.G1_TO_LITE`.
-2. **IK refinement.** Per-frame [`mink`](https://github.com/kevinzakka/mink) IK moves
-   the result toward the pelvis-local pose of both feet and both hands of the G1,
-   position and orientation. A per-DOF posture cost holds the solution near step 1,
-   so the step adjusts the pose and does not rearrange it.
-3. **Grounding.** A constant shift of the pelvis height per clip puts the lowest point
-   of the Lite soles on the floor in the median frame. Each source puts the G1 at its
-   own height, and AMASS puts the pelvis at the floor, so the shift is measured on the
-   Lite result. The median ignores the few frames where a heel or a toe dips through
-   the floor, which the IK does not prevent.
+2. **IK refinement.** Per-frame IK moves the result toward the pelvis-local pose of both
+   feet and both hands of the G1, position and orientation. A per-DOF posture cost holds
+   the solution near step 1, so the step adjusts the pose and does not rearrange it.
+
+### Both
+
+**Grounding.** A constant shift of the pelvis height per clip puts the lowest point of
+the Lite soles on the floor in the median frame. Each source puts the G1 at its own
+height, and AMASS puts the pelvis at the floor, so the shift is measured on the Lite
+result. The median ignores the few frames where a heel or a toe dips through the floor.
+
+**Metrics.** `retarget.motion_metrics` measures every motion. The robot layer keeps the
+numbers as its `metrics` property, and a run prints their mean:
+
+| Metric | What it measures |
+|---|---|
+| `foot_error_cm`, `hand_error_cm` | Mean distance from a goal to its link |
+| `foot_angle_deg`, `hand_angle_deg` | Mean angle between a goal and its link |
+| `foot_slide_cm_s` | Mean horizontal speed of the touching sole point, while the source stands on that foot |
+| `planted_gap_cm` | Mean distance from the lowest sole point to the floor, while the source stands on that foot |
+| `penetration_cm` | 95th percentile, over frames, of the deepest sole point below the floor |
+| `joint_speed_max` | Fastest joint between two frames, rad/s |
+
+The two paths do not aim at the same goals, so their goal errors do not compare. The
+floor metrics and the joint speed do. These are the means over the 40 LAFAN1 takes that
+both sources hold, with the current Lite Pro model:
+
+| Path | Foot slide | Planted gap | Penetration | Fastest joint |
+|---|---|---|---|---|
+| `lafan1bvh`, human | 2.6 cm/s | 0.40 cm | 1.1 cm | 19 rad/s |
+| `lafan1`, G1 | 9.2 cm/s | 1.53 cm | 4.1 cm | 21 rad/s |
+
+The human path has less foot slide, a smaller planted gap, and less penetration on 39 or
+more of the 40 takes.
 
 The IK solves against the Lite Pro MJCF of `lite-description`, and the robot layer draws
 the URDF of the same package. A new asset version therefore gives new motions.
@@ -188,6 +258,7 @@ before it can train on these motions.
 [dataset]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-LAFAN1-Dataset
 [space]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motion-Dataset
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
+[lafan1bvh]: https://github.com/ubisoft/ubisoft-laforge-animation-dataset
 [amass]: https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics
 [motiondecode]: https://huggingface.co/datasets/CMRobot/MotionDecode
 [kimodo]: https://huggingface.co/datasets/cagataydev/kimodo-g1-motion-v1

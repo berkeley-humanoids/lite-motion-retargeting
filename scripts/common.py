@@ -32,7 +32,7 @@ PUBLIC_SOURCE: str = "lafan1"
 
 #: The static Space that hosts the motion browser. The browser reads the motions from the
 #: dataset repo.
-SPACE_REPO_ID: str = "Berkeley-Humanoids/Lite-Motion-Dataset"
+SPACE_REPO_ID: str = "Berkeley-Humanoids/Lite-Motions"
 
 #: The local copy of each source and of the G1 model, one directory each.
 CACHE_ROOT: Path = Path(__file__).resolve().parent.parent / ".cache"

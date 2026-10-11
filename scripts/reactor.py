@@ -703,8 +703,9 @@ def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> Ma
             "motion_end": TerminationTermCfg(func=motion_end, time_out=True),
             "lost_track": TerminationTermCfg(func=lost_track),
         },
-        # One env step must take one frame, 1 / FPS: four physics steps of 5 ms.
-        sim=SimulationCfg(nconmax=128, njmax=512, mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20)),
+        # One env step must take one frame, 1 / FPS: four physics steps of 5 ms. A fall or a
+        # motion on the ground can need more than 512 constraint rows.
+        sim=SimulationCfg(nconmax=128, njmax=1024, mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20)),
         decimation=4,
         episode_length_s=1.0e6 if goals.playback else 10.0,
         auto_reset=not goals.playback,

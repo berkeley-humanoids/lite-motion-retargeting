@@ -197,19 +197,18 @@ def _posture_cost(lite: mujoco.MjModel) -> np.ndarray:
     The posture task pulls each joint toward step 1 with this cost. The frame task of each
     foot and hand pulls the joints away with cost 1.0 for position and 1.0 for orientation.
 
-    * ``1e3`` locks a joint. The neck and the fingers have no G1 joint, so they stay at the
-      0 of step 1.
+    * ``1e3`` locks a joint. The neck, the ankle yaw and the fingers have no G1 joint, so
+      they stay at the 0 of step 1. The motion holds them at 0, so the IK must not use them.
     * ``10.0`` makes a joint stiff but adjustable. The waist turns the torso and the head,
       so a high cost keeps the IK from twisting the whole upper body to reach a hand goal.
       The IK moves the arm joints first.
     * ``1.0`` matches the frame tasks. The arms and the legs get a balanced trade-off, and
-      the correction in each frame is small. The ankle yaw has this cost too, because its
-      name contains ``ankle``, but it has no G1 joint.
+      the correction in each frame is small.
     """
     cost = np.full(lite.nv, 1e3, dtype=np.float64)
     for jid in range(lite.njnt):
         name = mujoco.mj_id2name(lite, mujoco.mjtObj.mjOBJ_JOINT, jid)
-        if not name:
+        if name not in G1_DRIVEN:
             continue
         dof = int(lite.jnt_dofadr[jid])
         if any(limb in name for limb in ("hip", "knee", "ankle", "shoulder", "elbow", "wrist")):

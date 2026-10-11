@@ -96,7 +96,8 @@ async function loadCollections() {
 
   const first = collections[0].data;
   const merged = {
-    robot: first.robot, viewer: first.viewer, joint_names: first.joint_names, sources: {}, motions: [],
+    robot: first.robot, viewer: first.viewer, joint_names: first.joint_names,
+    groups: first.groups ?? [], robots: first.robots ?? [], sources: {}, motions: [],
   };
   for (const { data, ...collection } of collections) {
     if (data.joint_names.join() !== merged.joint_names.join()) {
@@ -108,6 +109,8 @@ async function loadCollections() {
     for (const entry of data.motions) {
       entry.collection = collection;
       entry.joints = data.joint_sets[entry.joint_set];
+      // An index built before it named the driven joints names the joints that move.
+      entry.active = data.active_sets?.[entry.active_set] ?? entry.joints;
       merged.motions.push(entry);
     }
   }
@@ -542,7 +545,7 @@ function createRenderer(canvas) {
 
 const $ = (id) => document.getElementById(id);
 const elements = {
-  search: $("search"), sources: $("sources"), categories: $("categories"), count: $("count"),
+  search: $("search"), sources: $("sources"), drives: $("drives"), categories: $("categories"), count: $("count"),
   sort: $("sort"), grid: $("grid"), more: $("more"), notice: $("notice"),
   viewer: $("viewer"), canvas: $("viewer-canvas"), loading: $("viewer-loading"),
   play: $("play"), scrub: $("scrub"), clock: $("clock"), speed: $("speed"),
@@ -556,8 +559,9 @@ const figures = {};  // "character" and "robot", each a figure
 let figure = null;   // the one on show
 let stage = null;
 const byName = new Map();
-// `group` is a category of one source, as "<source>:<category>", or null for all.
-const state = { query: [], sources: new Set(), group: null, sort: "name" };
+// `group` is a category of one source, as "<source>:<category>", or null for all. `drives`
+// holds the joint groups a motion must drive in full.
+const state = { query: [], sources: new Set(), drives: new Set(), group: null, sort: "name" };
 let filtered = [];
 let shown = 0;
 
@@ -764,8 +768,18 @@ function update() {
     });
   }));
 
+  const picked = searched.filter((entry) => state.sources.has(entry.source));
+  elements.drives.replaceChildren(...index.groups.map(({ title }) => {
+    const tally = picked.filter((entry) => entry.drives.has(title)).length;
+    return filterRow(title, tally, state.drives.has(title), true, () => {
+      if (state.drives.has(title)) state.drives.delete(title);
+      else state.drives.add(title);
+      update();
+    });
+  }));
+
   // Each source groups its clips its own way, so each lists its own categories.
-  const matches = searched.filter((entry) => state.sources.has(entry.source));
+  const matches = picked.filter((entry) => [...state.drives].every((title) => entry.drives.has(title)));
   const tallies = new Map();
   for (const entry of matches) tallies.set(entry.group, (tallies.get(entry.group) ?? 0) + 1);
   if (state.group && !tallies.has(state.group)) state.group = null;
@@ -937,6 +951,31 @@ function sourceRate(entry) {
   return `${entry.source_fps} Hz, resampled to ${entry.fps} Hz`;
 }
 
+// The joint groups `entry` drives, in full or in part, and those that hold zero.
+function describeDrives(entry) {
+  const active = new Set(entry.active);
+  const driven = [];
+  const held = [];
+  for (const { title, joints } of index.groups) {
+    const count = joints.filter((joint) => active.has(joint)).length;
+    if (count === joints.length) driven.push(title.toLowerCase());
+    else if (count > 0) driven.push(`${title.toLowerCase()} (${count} of ${joints.length})`);
+    else held.push(title.toLowerCase());
+  }
+  const list = (words) => words.length > 1 ? `${words.slice(0, -1).join(", ")} and ${words.at(-1)}` : words[0] ?? "none";
+  const total = `${entry.active.length} of ${index.joint_names.length} joints`;
+  const rest = held.length ? `. ${list(held).replace(/^./, (c) => c.toUpperCase())} hold zero.` : ".";
+  return `${total}: ${list(driven)}${rest}`;
+}
+
+// How many of the joints of each Lite robot `entry` drives.
+function describeRobots(entry) {
+  const active = new Set(entry.active);
+  return index.robots
+    .map(({ title, joints }) => `${title} ${joints.filter((joint) => active.has(joint)).length}/${joints.length}`)
+    .join(" · ");
+}
+
 function describe(entry) {
   const source = index.sources[entry.source];
   elements.source.textContent = `${source.title} · ${entry.category}`;
@@ -946,7 +985,9 @@ function describe(entry) {
     ["Length", `${formatLength(entry.seconds)} · ${entry.frames.toLocaleString()} frames at ${entry.fps} Hz`],
     ["Source rate", sourceRate(entry)],
     ["Travel", `${entry.travel.toFixed(1)} m of pelvis path over the floor`],
-    ["Joints", `${entry.joints.length} of ${index.joint_names.length} move; the rest hold zero`],
+    ["Skeleton", source.skeleton ?? "Unitree G1, 29 joints"],
+    ["Drives", describeDrives(entry)],
+    ["Robots", describeRobots(entry)],
     ["Clip", entry.clip ?? "Not in the local download of the source", "mono"],
     ["License", source.license],
   ];
@@ -1143,6 +1184,17 @@ async function main() {
       "<code>uv run scripts/serve.py</code>. A page opened from the file system cannot read it.",
     );
     return;
+  }
+  // Most motions share a few driven sets, so work out the groups of each set once.
+  const drivesOf = new Map();
+  for (const entry of index.motions) {
+    if (!drivesOf.has(entry.active)) {
+      const active = new Set(entry.active);
+      drivesOf.set(entry.active, new Set(index.groups
+        .filter(({ joints }) => joints.every((joint) => active.has(joint)))
+        .map(({ title }) => title)));
+    }
+    entry.drives = drivesOf.get(entry.active);
   }
   for (const entry of index.motions) {
     const source = index.sources[entry.source];

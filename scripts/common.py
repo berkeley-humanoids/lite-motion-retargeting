@@ -1,9 +1,8 @@
-"""Shared helpers for the LAFAN1 → Lite retargeting pipeline.
+"""Shared helpers for the G1 → Lite retargeting pipeline.
 
 Conventions:
-- Quaternions are scalar-first WXYZ, unit-norm, ``w >= 0``. The only non-WXYZ
-  appearance is the LAFAN1 CSV row, converted exactly once in
-  :func:`load_lafan_csv`.
+- Quaternions are scalar-first WXYZ, unit-norm, ``w >= 0``. A source file may store
+  XYZW, and its loader in ``sources.py`` converts it exactly once.
 - The Lite ``joint_pos`` column order is whatever MuJoCo emits from the MJCF
   (:func:`lite_joint_names`); we never hardcode it.
 """
@@ -13,19 +12,30 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from lite_description import get_mjcf_path, get_urdf_path
 from scipy.spatial.transform import Rotation, Slerp
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-
-#: The rate of the LAFAN1 CSVs.
-SOURCE_FPS: int = 30
 
 #: The rate a motion is written at, which is the control rate of the training
 #: environment. A motion at another rate would force the loader to interpolate.
 FPS: int = 50
 
-LAFAN_REPO_ID: str = "lvhaidong/LAFAN1_Retargeting_Dataset"
 DATASET_REPO_ID: str = "Berkeley-Humanoids/Lite-LAFAN1-Dataset"
+
+#: The one source the Hub repo holds. The terms of the others forbid it: AMASS bars any
+#: redistribution, and ChingMu bars hosting MotionDecode as a competing dataset. Their
+#: motions stay in the local store, for training.
+PUBLIC_SOURCE: str = "lafan1"
+
+#: The static Space that hosts the motion browser. It reads the motions from the dataset repo.
+SPACE_REPO_ID: str = "Berkeley-Humanoids/Lite-Motion-Dataset"
+
+CACHE_ROOT: Path = Path(__file__).resolve().parent.parent / ".cache"
+
+#: The G1 model that every source was retargeted to. The LAFAN1 repo bundles it.
+G1_REPO_ID: str = "lvhaidong/LAFAN1_Retargeting_Dataset"
+G1_URDF_PATH: Path = CACHE_ROOT / "g1" / "robot_description" / "g1" / "g1_29dof_rev_1_0.urdf"
 
 #: The body both robots are rooted at. Neither model gives it a joint, so it is the
 #: frame forward kinematics runs in rather than a body of the result, and the base
@@ -48,12 +58,9 @@ IK_BODY_PAIRS: dict[str, str] = {
 ROBOT_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS)
 SOURCE_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS.values())
 
-LAFAN_G1_URDF_RELPATH: str = "robot_description/g1/g1_29dof_rev_1_0.urdf"
-
-# Authoritative LAFAN1 G1 CSV joint order. Every CSV row is
-# ``[base_x, base_y, base_z, base_qx, base_qy, base_qz, base_qw,
-#   *G1_LAFAN_JOINT_NAMES]`` at :data:`SOURCE_FPS`.
-G1_LAFAN_JOINT_NAMES: tuple[str, ...] = (
+#: The joints of the 29-DoF G1, in the order every source stores them after the base
+#: position and rotation.
+G1_JOINT_NAMES: tuple[str, ...] = (
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
     "left_hip_yaw_joint",
@@ -141,9 +148,7 @@ G1_TO_LITE: dict[str, tuple[str, int, float]] = {
 
 def load_lite_model() -> mujoco.MjModel:
     """Load the Lite Pro MJCF, the same asset that the training repo loads."""
-    from robot_assets import load
-
-    return mujoco.MjModel.from_xml_path(str(load("robots/lite_pro/mjcf/lite_pro.xml")))
+    return mujoco.MjModel.from_xml_path(str(get_mjcf_path("lite_pro")))
 
 
 def lite_urdf_path() -> Path:
@@ -152,13 +157,11 @@ def lite_urdf_path() -> Path:
     The MJCF drives the retarget and this URDF only draws it, so the two must describe
     one robot. They come from one asset package, and their joint and link names match.
     """
-    from robot_assets import load
-
-    return Path(load("robots/lite_pro/urdf/lite_pro.urdf"))
+    return get_urdf_path("lite_pro")
 
 
-def load_g1_model(lafan_root: Path) -> mujoco.MjModel:
-    """Load the Unitree G1 URDF bundled in the downloaded LAFAN1 dataset.
+def load_g1_model() -> mujoco.MjModel:
+    """Load the Unitree G1 URDF that ``scripts/download.py`` puts in the cache.
 
     The URDF declares ``<compiler meshdir="meshes"/>`` and also references
     meshes as ``meshes/foo.STL`` — MuJoCo would concatenate to
@@ -166,10 +169,10 @@ def load_g1_model(lafan_root: Path) -> mujoco.MjModel:
     mesh bytes through the ``assets`` dict so nothing touches the filesystem
     a second time.
     """
-    urdf = Path(lafan_root) / LAFAN_G1_URDF_RELPATH
+    urdf = G1_URDF_PATH
     if not urdf.exists():
         raise FileNotFoundError(
-            f"G1 URDF not found at {urdf}. Run scripts/download_lafan.py first."
+            f"G1 URDF not found at {urdf}. Run scripts/download.py first."
         )
     text = re.sub(r'meshdir="[^"]*"', 'meshdir="."', urdf.read_text())
     assets = {f"meshes/{p.name}": p.read_bytes() for p in (urdf.parent / "meshes").glob("*.STL")}
@@ -210,43 +213,13 @@ def lite_joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
     return tuple(names)
 
 
-# ── LAFAN1 CSV I/O ────────────────────────────────────────────────────────────
-
-
-def load_lafan_csv(path: Path) -> dict[str, np.ndarray]:
-    """Read one LAFAN1 G1 CSV into base pose + joint positions.
-
-    On-disk format: headerless, :data:`SOURCE_FPS`, ``[base_xyz(3), base_quat_xyzw(4),
-    joint_pos(29)]`` per row. Converts XYZW → WXYZ and flips quaternion sign
-    so ``w >= 0``.
-
-    Returns:
-        Dict with ``base_pos`` ``(T, 3)``, ``base_quat_wxyz`` ``(T, 4)``,
-        ``g1_joint_pos`` ``(T, 29)`` — all float32. Joint columns follow
-        :data:`G1_LAFAN_JOINT_NAMES`.
-    """
-    raw = np.loadtxt(path, delimiter=",", dtype=np.float32)
-    expected_cols = 7 + len(G1_LAFAN_JOINT_NAMES)
-    if raw.ndim != 2 or raw.shape[1] != expected_cols:
-        raise ValueError(
-            f"{path}: expected {expected_cols} columns, got shape {raw.shape}"
-        )
-    base_quat = np.empty((raw.shape[0], 4), dtype=np.float32)
-    base_quat[:, 0] = raw[:, 6]
-    base_quat[:, 1:4] = raw[:, 3:6]
-    base_quat /= np.linalg.norm(base_quat, axis=1, keepdims=True)
-    base_quat[base_quat[:, 0] < 0] *= -1.0
-    return {
-        "base_pos": raw[:, 0:3],
-        "base_quat_wxyz": base_quat,
-        "g1_joint_pos": raw[:, 7:],
-    }
+# ── Resampling ────────────────────────────────────────────────────────────────
 
 
 def resample_motion(
     motion: dict[str, np.ndarray], src_fps: int, dst_fps: int
 ) -> dict[str, np.ndarray]:
-    """Resample the output of :func:`load_lafan_csv` from ``src_fps`` onto ``dst_fps``.
+    """Resample the output of a source loader from ``src_fps`` onto ``dst_fps``.
 
     The source is resampled, and not the retarget, so that the IK solves every frame
     that reaches the file and the body poses stay the exact kinematics of the joints
@@ -341,3 +314,43 @@ def world_poses(
             )
             pos[t, k], quat[t, k] = world_pos, world_quat
     return pos, quat
+
+
+def sole_heights(
+    model: mujoco.MjModel,
+    joint_addrs: np.ndarray,
+    joint_pos: np.ndarray,
+    base_pos: np.ndarray,
+    base_quat: np.ndarray,
+    foot_names: tuple[str, ...],
+) -> np.ndarray:
+    """World height of the lowest point of ``foot_names``, per frame, ``(T,)``.
+
+    A foot is the collision geoms of its body, each taken at the box MuJoCo bounds it
+    with (``geom_aabb``), which is exact for a box. The visual mesh is not a foot: it
+    does not touch the floor in simulation.
+
+    The arguments are those of :func:`world_poses`.
+    """
+    data = mujoco.MjData(model)
+    feet = {body_id(model, name) for name in foot_names}
+    geoms = [
+        g for g in range(model.ngeom)
+        if model.geom_bodyid[g] in feet and (model.geom_contype[g] or model.geom_conaffinity[g])
+    ]
+    centers, halves = model.geom_aabb[geoms, :3], model.geom_aabb[geoms, 3:]
+    # Row z of each base rotation: the world up axis, written in the pelvis frame.
+    ups = Rotation.from_quat(np.asarray(base_quat)[:, [1, 2, 3, 0]]).as_matrix()[:, 2]
+
+    heights = np.empty(joint_pos.shape[0], dtype=np.float32)
+    for t in range(joint_pos.shape[0]):
+        data.qpos[joint_addrs] = joint_pos[t]
+        mujoco.mj_kinematics(model, data)
+        rotations = data.geom_xmat[geoms].reshape(-1, 3, 3)
+        center = data.geom_xpos[geoms] + np.einsum("gij,gj->gi", rotations, centers)
+        # The up axis in each geom frame. A box reaches lowest along it by the sum of its
+        # half extents, each weighted by how far up its axis points.
+        up = ups[t] @ rotations
+        lowest = center @ ups[t] - np.sum(np.abs(up) * halves, axis=1)
+        heights[t] = base_pos[t, 2] + lowest.min()
+    return heights

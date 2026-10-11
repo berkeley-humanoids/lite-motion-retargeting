@@ -1,7 +1,8 @@
-.cache/
-dataset/
-data/
+.cache
+dataset
+data
 __pycache__/
 *.pyc
 .venv/
 uv.lock
+site/character.vrm

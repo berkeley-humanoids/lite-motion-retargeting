@@ -1,23 +1,25 @@
-"""Retarget LAFAN1 G1 motions to the Berkeley Lite humanoid.
+"""Retarget G1 motions to the Berkeley Lite humanoid.
 
-Two-step pipeline per clip:
+Pipeline per clip, after the source is resampled to the output rate:
 
 * **Step 1** — direct joint copy ``lite_q = sign * g1_q + offset`` using the
-  static :data:`common.G1_TO_LITE` table. Adds a constant pelvis-z shift so
-  Lite's feet stand on the ground.
+  static :data:`common.G1_TO_LITE` table.
 * **Step 2** — per-frame ``mink`` IK that refines step 1 to match G1's
   pelvis-local EE poses (feet + hands, position + orientation). The
   per-DOF posture cost biases the solution toward step 1 so the refinement
   is a *tweak*, not a rearrangement.
+* **Grounding** — a constant pelvis-z shift per clip that puts the lowest point of
+  Lite's soles on the floor in the median frame.
 
 One clip becomes two layers of one motion in ``dataset/``: ``base/``, the source clip
-as published at 30 Hz, and ``lite_pro/``, at the 50 Hz control rate, holding the joints
-the IK reached and the goal it aimed at. ``scripts/store.py`` defines that store, and
-``scripts/publish.py`` uploads it.
+as published at its own rate, and ``lite_pro/``, at the 50 Hz control rate, holding the
+joints the IK reached and the goal it aimed at. ``scripts/sources.py`` lists the sources,
+``scripts/store.py`` defines the store, and ``scripts/publish.py`` uploads it.
 
 Usage:
     uv run scripts/retarget.py
     uv run scripts/retarget.py --clip 'walk1_subject1'
+    uv run scripts/retarget.py --source amass --clip '^CMU/'
     uv run scripts/retarget.py --validate-only
     uv run scripts/retarget.py --workers -1          # every clip, every core
 """
@@ -25,7 +27,7 @@ Usage:
 import os
 import re
 import sys
-from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from typing import NamedTuple
 
@@ -36,35 +38,41 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
+    CACHE_ROOT,
     FPS,
-    G1_LAFAN_JOINT_NAMES,
+    G1_JOINT_NAMES,
     G1_TO_LITE,
     IK_BODY_PAIRS,
+    PUBLIC_SOURCE,
     ROBOT_BODIES,
     SOURCE_BODIES,
-    SOURCE_FPS,
     body_id,
     joint_qpos_addr,
     lite_joint_names,
     lite_urdf_path,
     load_g1_model,
-    load_lafan_csv,
     load_lite_model,
     quat_mul,
     resample_motion,
+    sole_heights,
     world_poses,
 )
-from store import write_base_layer, write_blueprint, write_robot_layer  # noqa: E402
+from sources import SOURCES, clip_key, motion_name  # noqa: E402
+from store import write_asset, write_base_layer, write_blueprint, write_robot_layer  # noqa: E402
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-LAFAN_ROOT: Path = REPO_ROOT / ".cache" / "lafan1_g1"
 DATASET_ROOT: Path = REPO_ROOT / "dataset"
 
-#: Prefixes every motion name, so one store can hold a second source later.
-MOTION_PREFIX: str = "lafan1"
+#: The Lite bodies that stand on the floor.
+FEET: tuple[str, ...] = ("left_foot", "right_foot")
 
 # Validation frame stride for the EE-error summary.
 SAMPLE_STRIDE: int = 50
+
+# Clips a worker retargets before a fresh process replaces it. rerun 0.38 keeps two threads
+# alive for every recording it ever opened, and a motion opens two, so a worker that wrote
+# about 1,200 motions could no longer start a thread.
+WORKER_CLIPS: int = 100
 
 
 # ── Step 1: direct copy with sign + offset ────────────────────────────────────
@@ -77,7 +85,7 @@ def _build_remap_indices(
     """Parallel arrays ``(lite_col, g1_col, sign, offset)`` over mapped joints."""
     addr_to_col = {int(a): i for i, a in enumerate(lite_joint_addrs.tolist())}
     lite_cols, g1_cols, signs, offsets = [], [], [], []
-    for g1_col, g1_name in enumerate(G1_LAFAN_JOINT_NAMES):
+    for g1_col, g1_name in enumerate(G1_JOINT_NAMES):
         entry = G1_TO_LITE.get(g1_name)
         if entry is None:
             continue
@@ -94,45 +102,24 @@ def _build_remap_indices(
     )
 
 
-def _pelvis_z_offset(g1_model: mujoco.MjModel, lite_model: mujoco.MjModel) -> float:
-    """Difference in standing leg length between Lite and G1 (welded pelvis).
-
-    Both robots default with the pelvis at z=0 and feet hanging at negative z,
-    so ``-min(foot_z)`` is each robot's standing leg length; the difference
-    is the z-shift to apply to LAFAN1's base trajectory so Lite stays grounded.
-    """
-
-    def _leg_length(model: mujoco.MjModel, foot_names: tuple[str, str]) -> float:
-        data = mujoco.MjData(model)
-        mujoco.mj_kinematics(model, data)
-        return -min(float(data.xpos[body_id(model, n), 2]) for n in foot_names)
-
-    feet = ("left_foot", "right_foot")
-    return (_leg_length(lite_model, feet)
-            - _leg_length(g1_model, tuple(IK_BODY_PAIRS[foot] for foot in feet)))
-
-
 def step1_direct_remap(
     motion: dict[str, np.ndarray],
     lite_joint_addrs: np.ndarray,
     lite_model: mujoco.MjModel,
-    z_offset: float,
 ) -> dict[str, np.ndarray]:
     """Apply ``lite_q = sign * g1_q + offset`` to every mapped joint.
 
-    Returns ``base_pos`` (with the pelvis-z shift), ``base_quat`` (WXYZ,
-    unchanged from the source), and a ``(T, 74)`` ``joint_pos`` in Lite MJCF
-    order. Joints with no G1 source (neck, fingers, ankle_yaw) stay at 0.
+    Returns ``base_pos`` and ``base_quat`` (WXYZ), both unchanged from the source, and a
+    ``(T, 74)`` ``joint_pos`` in Lite MJCF order. Joints with no G1 source (neck,
+    fingers, ankle_yaw) stay at 0.
     """
     lite_cols, g1_cols, signs, offsets = _build_remap_indices(lite_model, lite_joint_addrs)
     frames = motion["base_pos"].shape[0]
     joint_pos = np.zeros((frames, lite_joint_addrs.shape[0]), dtype=np.float32)
     joint_pos[:, lite_cols] = signs * motion["g1_joint_pos"][:, g1_cols] + offsets
 
-    base_pos = motion["base_pos"].astype(np.float32, copy=True)
-    base_pos[:, 2] += z_offset
     return {
-        "base_pos": base_pos,
+        "base_pos": motion["base_pos"].astype(np.float32, copy=True),
         "base_quat": motion["base_quat_wxyz"].astype(np.float32),
         "joint_pos": joint_pos,
     }
@@ -217,7 +204,7 @@ def step2_ik_refine(
 
     g1_data = mujoco.MjData(g1_model)
     g1_addrs = np.asarray(
-        [joint_qpos_addr(g1_model, n) for n in G1_LAFAN_JOINT_NAMES], dtype=np.int32
+        [joint_qpos_addr(g1_model, n) for n in G1_JOINT_NAMES], dtype=np.int32
     )
     R_conv = _rest_frame_conversions(g1_model, lite_model)
 
@@ -260,6 +247,28 @@ def step2_ik_refine(
     return out
 
 
+# ── Step 3: grounding ─────────────────────────────────────────────────────────
+
+
+def ground_height(
+    lite_model: mujoco.MjModel,
+    lite_joint_addrs: np.ndarray,
+    joint_pos: np.ndarray,
+    base_pos: np.ndarray,
+    base_quat: np.ndarray,
+) -> float:
+    """The pelvis-z shift that puts Lite's lowest sole point on the floor.
+
+    A source places the base at its own height, AMASS at the floor, and Lite stands on
+    shorter legs and thicker soles than the G1, so no constant offset grounds every clip.
+    The shift is measured on the Lite result instead, in the median frame: a single
+    frame would let one sole that dips through the floor lift the whole clip, and a
+    foot stands on the floor in most frames of a clip.
+    """
+    heights = sole_heights(lite_model, lite_joint_addrs, joint_pos, base_pos, base_quat, FEET)
+    return -float(np.median(heights))
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 
@@ -284,7 +293,7 @@ def validate_ee_tracking(
     g1_data = mujoco.MjData(g1_model)
     lite_data = mujoco.MjData(lite_model)
     g1_addrs = np.asarray(
-        [joint_qpos_addr(g1_model, n) for n in G1_LAFAN_JOINT_NAMES], dtype=np.int32
+        [joint_qpos_addr(g1_model, n) for n in G1_JOINT_NAMES], dtype=np.int32
     )
 
     mujoco.mj_kinematics(g1_model, g1_data)
@@ -348,26 +357,24 @@ class Models(NamedTuple):
     g1_addrs: np.ndarray
     joint_addrs: np.ndarray
     joint_names: tuple[str, ...]
-    z_offset: float
     goal_conv: np.ndarray
 
 
 def load_models() -> Models:
-    """Compile both robots and measure the pelvis shift between them."""
-    g1 = load_g1_model(LAFAN_ROOT)
+    """Compile both robots."""
+    g1 = load_g1_model()
     lite = load_lite_model()
     names = lite_joint_names(lite)
     return Models(
         g1=g1,
         lite=lite,
         g1_addrs=np.asarray(
-            [joint_qpos_addr(g1, n) for n in G1_LAFAN_JOINT_NAMES], dtype=np.int32
+            [joint_qpos_addr(g1, n) for n in G1_JOINT_NAMES], dtype=np.int32
         ),
         joint_addrs=np.asarray(
             [joint_qpos_addr(lite, n) for n in names], dtype=np.int32
         ),
         joint_names=names,
-        z_offset=_pelvis_z_offset(g1, lite),
         goal_conv=_goal_conversions(g1, lite),
     )
 
@@ -400,10 +407,11 @@ def _goal_conversions(
 class Clip(NamedTuple):
     """One retargeted clip: the arrays the two layers of its motion are written from.
 
-    The ``source_*`` arrays are the clip as published, at :data:`SOURCE_FPS`. The rest
-    are the retarget, at :data:`FPS`.
+    The ``source_*`` arrays are the clip as published, at ``source_fps``. The rest are
+    the retarget, at :data:`FPS`.
     """
 
+    source_fps: int
     source_joint_pos: np.ndarray
     source_pos: np.ndarray
     source_quat: np.ndarray
@@ -414,26 +422,27 @@ class Clip(NamedTuple):
 
 def retarget_clip(
     models: Models,
-    csv_path: str,
+    source: str,
+    path: str,
     do_ik: bool,
     ik_iters: int,
     show_progress: bool = True,
 ) -> Clip:
-    """Run both steps on one clip, and pose the bodies each layer carries.
+    """Run every step on one clip of ``source``, and pose the bodies each layer carries.
 
     The base layer keeps the source untouched, at its own rate and in the frame
     convention of the G1. The robot layer carries the goal, which is the same G1 pose
     turned into the convention of the Lite link it drives, so it compares directly
     against that link.
     """
-    source = load_lafan_csv(Path(csv_path))
+    clip, source_fps = SOURCES[source].load(Path(path))
     source_pos, source_quat = world_poses(
-        models.g1, models.g1_addrs, source["g1_joint_pos"],
-        source["base_pos"], source["base_quat_wxyz"], tuple(IK_BODY_PAIRS.values()),
+        models.g1, models.g1_addrs, clip["g1_joint_pos"],
+        clip["base_pos"], clip["base_quat_wxyz"], tuple(IK_BODY_PAIRS.values()),
     )
 
-    motion = resample_motion(source, SOURCE_FPS, FPS)
-    step1 = step1_direct_remap(motion, models.joint_addrs, models.lite, models.z_offset)
+    motion = resample_motion(clip, source_fps, FPS)
+    step1 = step1_direct_remap(motion, models.joint_addrs, models.lite)
     joint_pos = step1["joint_pos"]
     if do_ik:
         joint_pos = step2_ik_refine(
@@ -441,14 +450,17 @@ def retarget_clip(
             iters=ik_iters, show_progress=show_progress,
         )
 
+    base_pos, base_quat = step1["base_pos"], step1["base_quat"]
+    base_pos[:, 2] += ground_height(models.lite, models.joint_addrs, joint_pos, base_pos, base_quat)
+
     # The goal rides the base trajectory of the retarget, not that of the source, so it
     # sits where the Lite pelvis sits and the two are directly comparable.
     goal_pos, goal_quat = world_poses(
         models.g1, models.g1_addrs, motion["g1_joint_pos"],
-        step1["base_pos"], step1["base_quat"], tuple(IK_BODY_PAIRS.values()),
+        base_pos, base_quat, tuple(IK_BODY_PAIRS.values()),
     )
     return Clip(
-        source["g1_joint_pos"], source_pos, source_quat,
+        source_fps, clip["g1_joint_pos"], source_pos, source_quat,
         joint_pos, goal_pos, quat_mul(goal_quat, models.goal_conv).astype(np.float32),
     )
 
@@ -457,48 +469,84 @@ _MODELS: Models | None = None
 
 
 def _worker_init() -> None:
-    """ProcessPoolExecutor initializer: compile the models once per worker."""
+    """Pool initializer: compile the models once per worker."""
     global _MODELS
     _MODELS = load_models()
 
 
-def _worker_retarget(job: tuple[str, bool, int]) -> Clip:
-    """Retarget one clip in a worker. The parent writes, so the store has one writer."""
+def write_motion(models: Models, name: str, clip: Clip, urdf: Path, geometry: bool) -> list[Path]:
+    """Write the base and the robot layer of one motion under ``DATASET_ROOT``."""
+    return [
+        write_base_layer(
+            DATASET_ROOT, name, clip.source_fps, G1_JOINT_NAMES,
+            clip.source_joint_pos, SOURCE_BODIES, clip.source_pos, clip.source_quat,
+        ),
+        write_robot_layer(
+            DATASET_ROOT, name, urdf, FPS, models.joint_names, clip.joint_pos,
+            ROBOT_BODIES, SOURCE_BODIES, clip.goal_pos, clip.goal_quat, geometry,
+        ),
+    ]
+
+
+def _worker_retarget(job: tuple[str, str, str, bool, int, str, bool]) -> tuple[list[str], str | None]:
+    """Retarget one clip in a worker, write its layers, and return their paths.
+
+    A motion has files of its own, so no two workers write one file, and writing here
+    keeps the parent from being the bottleneck: a short clip takes longer to write than
+    its share of the IK. A clip that fails returns its error in place of paths, so one
+    bad file among thousands does not stop the rest.
+    """
     assert _MODELS is not None
-    return retarget_clip(_MODELS, *job, show_progress=False)
+    source, path, name, ik, ik_iters, urdf, geometry = job
+    try:
+        clip = retarget_clip(_MODELS, source, path, ik, ik_iters, show_progress=False)
+        written = write_motion(_MODELS, name, clip, Path(urdf), geometry)
+    except Exception as error:  # noqa: BLE001 -- the parent lists every failed clip
+        return [], f"{path}: {type(error).__name__}: {error}"
+    return [str(path) for path in written], None
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 
 def main(
+    source: str = "lafan1",
     clip: str | None = None,
     ik: bool = True,
     ik_iters: int = 15,
     workers: int = 1,
     validate_only: bool = False,
 ) -> None:
-    """Retarget LAFAN1 G1 clips to Lite, and write the two layers of each motion.
+    """Retarget the G1 clips of a source to Lite, and write the two layers of each motion.
 
     Args:
-        clip: A regex. Retarget the clips whose name matches it.
+        source: One of the keys of ``sources.SOURCES``.
+        clip: A regex. Retarget the clips whose path below the clip directory of the
+            source matches it, as in ``CMU/07/07_01_poses_120_jpos`` for AMASS.
         ik: Refine step 1 with the step-2 IK. Set False to keep step 1 only.
         ik_iters: Newton steps per frame in step 2.
         workers: Processes to retarget clips in parallel. ``-1`` uses every core.
         validate_only: Retarget the first matching clip, print the end-effector
             error table, and write nothing.
     """
+    if source not in SOURCES:
+        raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")
     if workers == -1:
         workers = os.cpu_count() or 1
 
-    csvs = sorted((LAFAN_ROOT / "g1").glob("*.csv"))
+    spec = SOURCES[source]
+    clip_dir = CACHE_ROOT / source / spec.clip_dir
+    paths = sorted(clip_dir.glob(spec.clip_glob))
     if clip is not None:
-        csvs = [p for p in csvs if re.search(clip, p.stem)]
-    if not csvs:
+        paths = [p for p in paths if re.search(clip, clip_key(clip_dir, p))]
+    if not paths:
         raise SystemExit(
-            f"No CSVs to retarget under {LAFAN_ROOT / 'g1'} (clip={clip!r}). "
-            f"Run scripts/download_lafan.py first."
+            f"No clips to retarget under {clip_dir} (clip={clip!r}). "
+            f"Run scripts/download.py --source {source} first."
         )
+    names = [motion_name(source, clip_dir, p) for p in paths]
+    if len(set(names)) != len(names):
+        raise SystemExit(f"Two clips of {source} map to one motion name.")
 
     print("Loading models …")
     models = load_models()
@@ -506,18 +554,15 @@ def main(
     nonzero = sum(1 for _, _, off in G1_TO_LITE.values() if abs(off) > 1e-6)
     print(f"  G1 nq={models.g1.nq}, Lite nq={models.lite.nq}, "
           f"joints={len(models.joint_names)}")
-    print(
-        f"  {len(G1_TO_LITE)} joint pairs, {flipped} sign flips, "
-        f"{nonzero} nonzero offsets, pelvis z-offset={models.z_offset * 1000:.2f} mm"
-    )
-    print(f"  resampling {SOURCE_FPS} Hz -> {FPS} Hz")
+    print(f"  {len(G1_TO_LITE)} joint pairs, {flipped} sign flips, {nonzero} nonzero offsets")
+    print(f"  {len(paths)} clips of {source}, resampled to {FPS} Hz")
 
     if validate_only:
-        motion = resample_motion(load_lafan_csv(csvs[0]), SOURCE_FPS, FPS)
-        step1 = step1_direct_remap(
-            motion, models.joint_addrs, models.lite, models.z_offset
-        )
-        print(f"\nClip: {csvs[0].name} ({step1['joint_pos'].shape[0]} frames)")
+        clip_motion, source_fps = spec.load(paths[0])
+        motion = resample_motion(clip_motion, source_fps, FPS)
+        step1 = step1_direct_remap(motion, models.joint_addrs, models.lite)
+        print(f"\nClip: {paths[0].name} ({step1['joint_pos'].shape[0]} frames, "
+              f"{source_fps} Hz source)")
         print("\n=== Step 1 (direct copy with sign + offset) ===")
         validate_ee_tracking(
             motion, step1["joint_pos"], models.g1, models.lite, models.joint_addrs
@@ -535,39 +580,44 @@ def main(
 
     urdf = lite_urdf_path()
     blueprint = write_blueprint(DATASET_ROOT, urdf)
-    written = [blueprint]
-    jobs = [(str(path), ik, ik_iters) for path in csvs]
+    asset = write_asset(DATASET_ROOT, urdf)
+    written = [blueprint, asset]
+    # The Hub card links each published motion into the web viewer, which cannot load the
+    # asset, so a published motion carries its own geometry.
+    geometry = source == PUBLIC_SOURCE
 
-    def write_all(clips, desc: str) -> None:
-        for csv_path, result in tqdm(
-            zip(csvs, clips, strict=True), total=len(csvs), desc=desc, unit="clip"
-        ):
-            name = f"{MOTION_PREFIX}_{csv_path.stem}"
-            written.append(write_base_layer(
-                DATASET_ROOT, name, SOURCE_FPS, G1_LAFAN_JOINT_NAMES,
-                result.source_joint_pos, SOURCE_BODIES,
-                result.source_pos, result.source_quat,
-            ))
-            written.append(write_robot_layer(
-                DATASET_ROOT, name, urdf, FPS, models.joint_names, result.joint_pos,
-                ROBOT_BODIES, SOURCE_BODIES, result.goal_pos, result.goal_quat,
-            ))
-
+    failed = []
     if workers > 1:
-        with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init) as pool:
-            write_all(
-                pool.map(_worker_retarget, jobs, chunksize=1),
-                f"Clips (workers={workers})",
-            )
+        jobs = [
+            (source, str(path), name, ik, ik_iters, str(urdf), geometry)
+            for path, name in zip(paths, names, strict=True)
+        ]
+        # Spawn, not fork: the parent runs threads by now, and a forked child can inherit a
+        # held lock. ProcessPoolExecutor stops replacing workers that reach their task limit
+        # once many jobs are queued (CPython 3.13), so this uses multiprocessing.Pool.
+        with get_context("spawn").Pool(workers, _worker_init, maxtasksperchild=WORKER_CLIPS) as pool:
+            results = pool.imap(_worker_retarget, jobs)
+            for files, error in tqdm(
+                results, total=len(jobs), desc=f"Clips (workers={workers})", unit="clip"
+            ):
+                written += [Path(path) for path in files]
+                if error is not None:
+                    failed.append(error)
+        if failed:
+            print(f"\n{len(failed)} of {len(jobs)} clips failed and were skipped:")
+            for error in failed:
+                print(f"  {error}")
     else:
-        write_all((retarget_clip(models, *job) for job in jobs), "Clips")
+        for path, name in tqdm(zip(paths, names, strict=True), total=len(names), desc="Clips",
+                               unit="clip"):
+            result = retarget_clip(models, source, str(path), ik, ik_iters)
+            written += write_motion(models, name, result, urdf, geometry)
 
     total_mb = sum(path.stat().st_size for path in written) / 1e6
-    print(f"\nWrote {len(csvs)} motions as {len(written)} files "
+    print(f"\nWrote {len(names) - len(failed)} motions as {len(written)} files "
           f"({total_mb:.1f} MB) under {DATASET_ROOT}")
     # The blueprint goes last: blueprints do not merge, and the last one loaded wins.
-    print(f"  view: uv run rerun {DATASET_ROOT}/*/{MOTION_PREFIX}_{csvs[0].stem}.rrd "
-          f"{blueprint}")
+    print(f"  view: uv run rerun {DATASET_ROOT}/*/{names[0]}.rrd --asset {asset} {blueprint}")
 
 
 if __name__ == "__main__":

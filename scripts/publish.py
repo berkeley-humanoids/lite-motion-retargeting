@@ -1,12 +1,18 @@
-"""Upload the motion store to the Hugging Face Hub.
+"""Upload the motion store to the Hugging Face Hub, and the motion browser that plays it.
 
-The Hub repo mirrors ``dataset/`` exactly: a directory per layer, a file per motion, and
-``DATASET_CARD.md`` as the card the repo opens with. ``scripts/retarget.py`` writes the
-store, and this script only moves it.
+The Hub repo mirrors the LAFAN1 motions of ``dataset/``: a directory per layer, a file per
+motion, and ``DATASET_CARD.md`` as the card the repo opens with. ``scripts/retarget.py``
+writes the store, and this script only moves it. Beside the layers, ``web/`` holds the
+same motions as the browser plays them, which ``scripts/build_site.py`` writes from the
+store.
 
 The card is a template. This script fills its ``<!-- motions -->`` marker with an index
 of the motions that go up in the same commit, so the index cannot name a file the repo
 does not hold.
+
+The browser itself, ``site/``, goes to a static Space, with a ``collections.json`` that
+points at ``web/`` as of the commit just made. The Space keeps playing the motions it was
+published with until the next publish.
 
 Usage:
     uv run scripts/publish.py --dry-run
@@ -18,21 +24,31 @@ A write needs a token for the namespace:
     hf auth login          # or: export HF_TOKEN=hf_...
 """
 
+import json
 import sys
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
 import tyro
-from huggingface_hub import DatasetCard, HfApi
+from huggingface_hub import CommitOperationAdd, DatasetCard, HfApi
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATASET_REPO_ID  # noqa: E402
+from build_site import main as build_site  # noqa: E402
+from common import DATASET_REPO_ID, PUBLIC_SOURCE, SPACE_REPO_ID  # noqa: E402
 from store import BASE_LAYER  # noqa: E402
 
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 DATASET_ROOT: Path = REPO_ROOT / "dataset"
 CARD_PATH: Path = REPO_ROOT / "DATASET_CARD.md"
+SPACE_CARD_PATH: Path = REPO_ROOT / "SPACE_CARD.md"
+SITE_ROOT: Path = REPO_ROOT / "site"
+
+#: Where the browser data goes, under ``dataset/`` and in the repo.
+WEB_DIR: str = "web"
+
+#: The files of the page. The Space gets its own ``collections.json``.
+PAGE_FILES: tuple[str, ...] = ("index.html", "app.js", "style.css")
 
 #: Where the card's motion index goes.
 MOTIONS_MARKER: str = "<!-- motions -->"
@@ -57,20 +73,25 @@ def _motion_index(motions: list[Path], repo_id: str) -> str:
 
 def main(
     repo_id: str = DATASET_REPO_ID,
+    space_id: str = SPACE_REPO_ID,
     clear: bool = False,
     dry_run: bool = False,
 ) -> None:
-    """Upload ``dataset/`` and the dataset card to ``repo_id``.
+    """Upload ``dataset/``, its browser data and the dataset card to ``repo_id``, and the page to ``space_id``.
 
     Args:
         repo_id: The Hub dataset repo to write to.
+        space_id: The static Space to write the page to. It is created if missing.
         clear: Delete every file the repo holds that this store does not replace. Use it
             when a rename or a dropped clip would otherwise leave the old file behind.
         dry_run: Print what would go up, and upload nothing. The card is still
-            rendered into ``dataset/README.md``, so you can read it first.
+            rendered into ``dataset/README.md``, and the browser data built into
+            ``dataset/web/``, so you can look at both first.
     """
     files = sorted(
-        path for path in DATASET_ROOT.rglob("*") if path.suffix in (".rrd", ".rbl")
+        path for path in DATASET_ROOT.rglob("*")
+        if path.suffix == ".rbl"
+        or (path.suffix == ".rrd" and path.stem.startswith(f"{PUBLIC_SOURCE}_"))
     )
     if not files:
         raise SystemExit(
@@ -89,27 +110,58 @@ def main(
     )
     DatasetCard(card).save(DATASET_ROOT / "README.md")
 
+    # So does the browser data, built from the motions it goes up with.
+    build_site(sources=[PUBLIC_SOURCE], out=DATASET_ROOT / WEB_DIR)
+    web_files = [path for path in (DATASET_ROOT / WEB_DIR).rglob("*") if path.is_file()]
+
     layers = Counter(path.parent.name for path in files)
-    size_mb = sum(path.stat().st_size for path in files) / 1e6
-    print(f"{len(files)} files, {size_mb:.1f} MB -> {repo_id}")
+    size_mb = sum(path.stat().st_size for path in files + web_files) / 1e6
+    print(f"{len(files) + len(web_files)} files, {size_mb:.1f} MB -> {repo_id}")
     for layer, count in sorted(layers.items()):
         print(f"  {layer}/  {count}")
+    print(f"  {WEB_DIR}/  {len(web_files)}")
     print(f"  card indexes {len(motions)} motions")
+    print(f"  page: {', '.join(PAGE_FILES)} -> {space_id}")
     if dry_run:
         return
 
-    HfApi().upload_folder(
+    api = HfApi()
+    api.upload_folder(
         folder_path=str(DATASET_ROOT),
         repo_id=repo_id,
         repo_type="dataset",
-        # The store holds nothing else, and this keeps a stray file out of the repo.
-        allow_patterns=["*/*.rrd", "*/*.rbl", "README.md"],
+        # This keeps the other sources, and any stray file, out of the repo.
+        allow_patterns=[f"*/{PUBLIC_SOURCE}_*.rrd", "*/*.rbl", f"{WEB_DIR}/*", "README.md"],
         # A repo needs its `.gitattributes`, and the Hub keeps that one whatever the
         # pattern matches.
         delete_patterns="*" if clear else None,
         commit_message=f"Publish {len(files)} layer files from Lite-Motion-Retargeting",
     )
     print(f"Pushed to https://huggingface.co/datasets/{repo_id}")
+
+    # The page reads the data as of this commit, so a later publish cannot hand it packs
+    # that its index does not describe.
+    revision = api.dataset_info(repo_id).sha
+    publish_page(api, space_id, f"https://huggingface.co/datasets/{repo_id}/resolve/{revision}/{WEB_DIR}/")
+
+
+def publish_page(api: HfApi, space_id: str, data_url: str) -> None:
+    """Upload ``site/`` to the static Space ``space_id``, with ``data_url`` as its one collection."""
+    api.create_repo(space_id, repo_type="space", space_sdk="static", exist_ok=True)
+    collections = [{"url": data_url}]
+    operations = [
+        CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=str(SPACE_CARD_PATH)),
+        CommitOperationAdd(path_in_repo="collections.json", path_or_fileobj=json.dumps(collections).encode()),
+    ]
+    for name in PAGE_FILES:
+        operations.append(CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(SITE_ROOT / name)))
+    api.create_commit(
+        repo_id=space_id,
+        repo_type="space",
+        operations=operations,
+        commit_message="Publish the motion browser from Lite-Motion-Retargeting",
+    )
+    print(f"Pushed the page to https://huggingface.co/spaces/{space_id}")
 
 
 if __name__ == "__main__":

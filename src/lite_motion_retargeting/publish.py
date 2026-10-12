@@ -1,22 +1,25 @@
-"""Upload the motion store to the Hugging Face Hub, and the motion browser that plays it.
+"""Upload Hub datasets from the store, and the motion browser that plays them.
 
-The Hub repo mirrors the LAFAN1 motions of ``dataset/``: a directory per layer, a file per
-motion, and ``DATASET_CARD.md`` as the card of the repo. ``uv run retarget`` writes the
-store, and this step only uploads it. Beside the layers, ``web/`` holds the same motions
-in the form that the browser plays. ``build_site.py`` writes ``web/`` from the store.
+``hub.py`` lists the Hub datasets. Each Hub dataset repo mirrors the motions of its
+sources in ``dataset/``: a directory per layer, a file per motion, and its card. Beside
+the layers, ``web/`` holds the same motions in the form that the browser plays.
+``uv run retarget`` writes the store, and ``build_site.py`` writes ``web/`` from it. This
+step only uploads them.
 
-The card is a template. This step replaces its ``<!-- motions -->`` marker with an index
-of the motions in the same commit, so the index cannot name a file that the repo does not
-hold.
+The card is a template in ``cards/``. This step replaces its ``<!-- motions -->`` marker
+with an index of the motions. The card, the layers and ``web/`` go up in one commit, so
+the index cannot name a file that the repo does not hold.
 
-The browser page, ``site/``, goes to a static Space. Its ``collections.json`` points at
-``web/`` as of the commit that this step just made. Thus the Space plays the same
-motions until the next publish.
+The browser page, ``site/``, goes to a static Space. Its ``collections.json`` lists the
+``web/`` of each Hub dataset, as of the last commit to that repo. Thus the Space plays the
+same motions until the next publish.
 
 Usage:
     uv run publish --dry-run
-    uv run publish
-    uv run publish --clear   # also delete the other files in the repo
+    uv run publish                    # every Hub dataset, then the page
+    uv run publish --datasets lafan1  # one Hub dataset, then the page
+    uv run publish --datasets         # only the page
+    uv run publish --clear            # also delete the other files in each repo
 
 To upload, log in with a token that can write to the namespace:
 
@@ -29,31 +32,156 @@ from pathlib import Path
 from urllib.parse import quote
 
 import tyro
-from huggingface_hub import CommitOperationAdd, DatasetCard, HfApi
-
-from .build_site import VIEWER
-from .build_site import main as build_site
-from .common import (
-    DATASET_REPO_ID,
-    DATASET_ROOT,
-    PUBLIC_SOURCE,
-    REPO_ROOT,
-    SITE_ROOT,
-    SPACE_REPO_ID,
+from huggingface_hub import (
+    CommitOperationAdd,
+    CommitOperationDelete,
+    DatasetCard,
+    HfApi,
+    SpaceCard,
 )
+from huggingface_hub.errors import RepositoryNotFoundError
+from rerun.chunk import RrdReader
+
+from .build_site import VIEWER, source_of
+from .build_site import main as build_site
+from .common import DATASET_ROOT, SITE_ROOT
+from .hub import HUB_DATASETS, SPACE_CARD, SPACE_REPO_ID
 from .store import BASE_LAYER
 
-CARD_PATH: Path = REPO_ROOT / "DATASET_CARD.md"
-SPACE_CARD_PATH: Path = REPO_ROOT / "SPACE_CARD.md"
-
-#: The directory of the browser data, in ``dataset/`` and in the repo.
+#: The directory of the browser data in a Hub dataset repo.
 WEB_DIR: str = "web"
+
+#: Where this step writes the card and ``web/`` of each Hub dataset before the upload, a
+#: directory per Hub dataset.
+STAGE_ROOT: Path = DATASET_ROOT / "hub"
 
 #: The files of the page. The Space gets its own ``collections.json``.
 PAGE_FILES: tuple[str, ...] = ("index.html", "app.js", "style.css")
 
-#: The marker in the card that the motion index replaces.
+#: The marker in a card that the motion index replaces.
 MOTIONS_MARKER: str = "<!-- motions -->"
+
+
+def main(
+    datasets: tuple[str, ...] = tuple(HUB_DATASETS),
+    clear: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Upload ``datasets`` to their Hub repos, then the motion browser to its Space.
+
+    Args:
+        datasets: The names in ``hub.HUB_DATASETS`` to upload. The default is every Hub
+            dataset. With ``--datasets`` and no name, only the page goes up.
+        clear: Delete each file in a Hub dataset repo that this upload does not replace. Use
+            this flag after you rename or remove a clip, to delete the old file.
+        dry_run: Print a summary of each upload, and upload nothing. The step still writes
+            the card and ``web/`` of each Hub dataset to ``dataset/hub/<name>/``, so you can
+            examine them first.
+    """
+    unknown = sorted(set(datasets) - set(HUB_DATASETS))
+    if unknown:
+        raise SystemExit(f"Unknown Hub datasets {unknown}. Choose from {sorted(HUB_DATASETS)}.")
+    api = HfApi()
+    for name in datasets:
+        publish_dataset(api, name, clear, dry_run)
+    publish_page(api, dry_run)
+
+
+def publish_dataset(api: HfApi, name: str, clear: bool, dry_run: bool) -> None:
+    """Upload the motions of the Hub dataset ``name``, their browser data, and the card."""
+    dataset = HUB_DATASETS[name]
+    layers = sorted(path for path in DATASET_ROOT.glob("*/*.rrd") if source_of(path) in dataset.sources)
+    motions = [path for path in layers if path.parent.name != BASE_LAYER]
+    if not motions:
+        raise SystemExit(f"No motions of {', '.join(dataset.sources)} in {DATASET_ROOT}. Run `uv run retarget` first.")
+    if not _has_geometry(motions[0]):
+        raise SystemExit(
+            f"{motions[0]} has no robot geometry, so the Rerun web viewer cannot draw it. "
+            f"Retarget the sources of {name!r} again: `uv run retarget` writes the geometry for a "
+            "source of a Hub dataset."
+        )
+
+    # `DatasetCard` parses the YAML front matter, so a broken card fails here, not on the Hub.
+    stage = STAGE_ROOT / name
+    stage.mkdir(parents=True, exist_ok=True)
+    card = dataset.card.read_text().replace(MOTIONS_MARKER, _motion_index(motions, dataset.repo_id))
+    DatasetCard(card).save(stage / "README.md")
+    build_site(sources=list(dataset.sources), out=stage / WEB_DIR)
+
+    files = {f"{path.parent.name}/{path.name}": path for path in layers}
+    files |= {f"blueprints/{path.name}": path for path in DATASET_ROOT.glob("blueprints/*.rbl")}
+    files |= {
+        path.relative_to(stage).as_posix(): path
+        for path in (stage / "README.md", *(stage / WEB_DIR).rglob("*")) if path.is_file()
+    }
+    folders = Counter(repo_path.split("/")[0] for repo_path in files if "/" in repo_path)
+    size_mb = sum(path.stat().st_size for path in files.values()) / 1e6
+    print(f"{name}: {len(files)} files, {size_mb:.1f} MB -> {dataset.repo_id}"
+          f"{' (private)' if dataset.private else ''}")
+    for folder, count in sorted(folders.items()):
+        print(f"  {folder}/  {count}")
+    print(f"  card indexes {len(motions)} motions")
+    if dry_run:
+        return
+
+    api.create_repo(dataset.repo_id, repo_type="dataset", private=dataset.private, exist_ok=True)
+    operations = [
+        CommitOperationAdd(path_in_repo=repo_path, path_or_fileobj=str(path))
+        for repo_path, path in files.items()
+    ]
+    if clear:
+        # A repo needs its `.gitattributes`, which the Hub writes.
+        stale = set(api.list_repo_files(dataset.repo_id, repo_type="dataset")) - set(files)
+        operations += [CommitOperationDelete(path_in_repo=path) for path in sorted(stale - {".gitattributes"})]
+    api.create_commit(
+        repo_id=dataset.repo_id,
+        repo_type="dataset",
+        operations=operations,
+        commit_message=f"Publish {len(layers)} layer files from Lite-Motion-Retargeting",
+    )
+    print(f"Pushed to https://huggingface.co/datasets/{dataset.repo_id}")
+
+
+def publish_page(api: HfApi, dry_run: bool) -> None:
+    """Upload ``site/`` to the Space, with the ``web/`` of each Hub dataset as a collection.
+
+    A collection reads its Hub dataset at the last commit to the repo, so a later publish
+    cannot give the page packs that its index does not describe. A Hub dataset that is not
+    on the Hub yet has no collection.
+    """
+    collections = []
+    for name, dataset in HUB_DATASETS.items():
+        try:
+            revision = api.dataset_info(dataset.repo_id).sha
+        except RepositoryNotFoundError:
+            print(f"  {name}: {dataset.repo_id} is not on the Hub, so the page leaves it out")
+            continue
+        url = f"https://huggingface.co/datasets/{dataset.repo_id}/resolve/{revision}/{WEB_DIR}/"
+        collections.append({"url": url, "private": True} if dataset.private else {"url": url})
+
+    # The card links the public Hub datasets, so that the Hub lists the Space on their pages.
+    card = SpaceCard(SPACE_CARD.read_text())
+    card.data.datasets = [dataset.repo_id for dataset in HUB_DATASETS.values() if not dataset.private]
+    files = {
+        "README.md": str(card).encode(),
+        "collections.json": json.dumps(collections, indent=2).encode(),
+        **{name: str(SITE_ROOT / name) for name in PAGE_FILES},
+    }
+    print(f"page: {', '.join(files)} -> {SPACE_REPO_ID}")
+    print(f"  {len(collections)} collections: " + ", ".join(c["url"] for c in collections))
+    if dry_run:
+        return
+
+    api.create_repo(SPACE_REPO_ID, repo_type="space", space_sdk="static", exist_ok=True)
+    api.create_commit(
+        repo_id=SPACE_REPO_ID,
+        repo_type="space",
+        operations=[
+            CommitOperationAdd(path_in_repo=path, path_or_fileobj=data) for path, data in files.items()
+        ],
+        commit_message="Publish the motion browser from Lite-Motion-Retargeting",
+    )
+    print(f"Pushed the page to https://huggingface.co/spaces/{SPACE_REPO_ID}")
 
 
 def _motion_index(motions: list[Path], repo_id: str) -> str:
@@ -70,93 +198,9 @@ def _motion_index(motions: list[Path], repo_id: str) -> str:
     return "\n".join(rows)
 
 
-def main(
-    repo_id: str = DATASET_REPO_ID,
-    space_id: str = SPACE_REPO_ID,
-    clear: bool = False,
-    dry_run: bool = False,
-) -> None:
-    """Upload the store, its browser data and the card to ``repo_id``, and the page to ``space_id``.
-
-    Args:
-        repo_id: The Hub dataset repo to write to.
-        space_id: The static Space to write the page to. The step creates it if it does
-            not exist.
-        clear: Delete each file in the repo that this upload does not replace. Use this flag
-            after you rename or remove a clip, to delete the old file.
-        dry_run: Print a summary of the upload, and upload nothing. The step still
-            writes the card to ``dataset/README.md`` and the browser data to
-            ``dataset/web/``, so you can examine both first.
-    """
-    files = sorted(
-        path for path in DATASET_ROOT.rglob("*")
-        if path.suffix == ".rbl"
-        or (path.suffix == ".rrd" and path.stem.startswith(f"{PUBLIC_SOURCE}_"))
-    )
-    if not files:
-        raise SystemExit(f"No motions under {DATASET_ROOT}. Run `uv run retarget` first.")
-
-    # The card goes up in the same commit as the data, so the card always matches the files
-    # of the repo. `DatasetCard` parses the YAML front matter, so a broken card fails here,
-    # not on the Hub.
-    motions = [
-        path for path in files
-        if path.suffix == ".rrd" and path.parent.name != BASE_LAYER
-    ]
-    card = CARD_PATH.read_text().replace(MOTIONS_MARKER, _motion_index(motions, repo_id))
-    DatasetCard(card).save(DATASET_ROOT / "README.md")
-
-    # The browser data goes up in the same commit too, built from the same motions.
-    build_site(sources=[PUBLIC_SOURCE], out=DATASET_ROOT / WEB_DIR)
-    web_files = [path for path in (DATASET_ROOT / WEB_DIR).rglob("*") if path.is_file()]
-
-    layers = Counter(path.parent.name for path in files)
-    size_mb = sum(path.stat().st_size for path in files + web_files) / 1e6
-    print(f"{len(files) + len(web_files)} files, {size_mb:.1f} MB -> {repo_id}")
-    for layer, count in sorted(layers.items()):
-        print(f"  {layer}/  {count}")
-    print(f"  {WEB_DIR}/  {len(web_files)}")
-    print(f"  card indexes {len(motions)} motions")
-    print(f"  page: {', '.join(PAGE_FILES)} -> {space_id}")
-    if dry_run:
-        return
-
-    api = HfApi()
-    api.upload_folder(
-        folder_path=str(DATASET_ROOT),
-        repo_id=repo_id,
-        repo_type="dataset",
-        # This keeps the other sources, and any stray file, out of the repo.
-        allow_patterns=[f"*/{PUBLIC_SOURCE}_*.rrd", "*/*.rbl", f"{WEB_DIR}/*", "README.md"],
-        # The Hub keeps `.gitattributes`, which a repo needs, though the pattern matches it.
-        delete_patterns="*" if clear else None,
-        commit_message=f"Publish {len(files)} layer files from Lite-Motion-Retargeting",
-    )
-    print(f"Pushed to https://huggingface.co/datasets/{repo_id}")
-
-    # The page reads the data at this commit, so a later publish cannot give it packs that
-    # its index does not describe.
-    revision = api.dataset_info(repo_id).sha
-    publish_page(api, space_id, f"https://huggingface.co/datasets/{repo_id}/resolve/{revision}/{WEB_DIR}/")
-
-
-def publish_page(api: HfApi, space_id: str, data_url: str) -> None:
-    """Upload ``site/`` to the static Space ``space_id``, with ``data_url`` as its one collection."""
-    api.create_repo(space_id, repo_type="space", space_sdk="static", exist_ok=True)
-    files = {
-        "README.md": str(SPACE_CARD_PATH),
-        "collections.json": json.dumps([{"url": data_url}]).encode(),
-        **{name: str(SITE_ROOT / name) for name in PAGE_FILES},
-    }
-    api.create_commit(
-        repo_id=space_id,
-        repo_type="space",
-        operations=[
-            CommitOperationAdd(path_in_repo=path, path_or_fileobj=data) for path, data in files.items()
-        ],
-        commit_message="Publish the motion browser from Lite-Motion-Retargeting",
-    )
-    print(f"Pushed the page to https://huggingface.co/spaces/{space_id}")
+def _has_geometry(path: Path) -> bool:
+    """Return whether the robot layer in ``path`` holds the geometry of its robot."""
+    return any("/visual_geometries/" in chunk.entity_path for chunk in RrdReader(path).stream())
 
 
 def cli() -> None:

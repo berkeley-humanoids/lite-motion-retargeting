@@ -49,15 +49,8 @@ from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from .common import (
-    CACHE_ROOT,
-    DATASET_REPO_ID,
-    DATASET_ROOT,
-    G1_DRIVEN,
-    PUBLIC_SOURCE,
-    SITE_ROOT,
-    lite_urdf_path,
-)
+from .common import CACHE_ROOT, DATASET_ROOT, G1_DRIVEN, SITE_ROOT, lite_urdf_path
+from .hub import hub_dataset_of
 from .sources import SOURCES, clip_key, motion_name
 from .store import BASE_LAYER
 
@@ -91,9 +84,6 @@ ROBOTS: dict[str, str] = {
 
 #: The Rerun web viewer. It opens the recording at the URL that follows this prefix.
 VIEWER: str = "https://rerun.io/viewer?url="
-
-#: The URL prefix of the files in the Hub repo.
-HUB_FILES: str = f"https://huggingface.co/datasets/{DATASET_REPO_ID}/resolve/main/"
 
 
 def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
@@ -180,9 +170,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
                 "license": SOURCES[key].license,
                 "skeleton": SOURCES[key].skeleton,
                 "url": SOURCES[key].page or f"https://huggingface.co/datasets/{SOURCES[key].repo_id}",
-                # The Hub repo holds only the public source, so only its motions have a URL
-                # that the web viewer can open.
-                "hub": f"{HUB_FILES}{robot}/" if key == PUBLIC_SOURCE else None,
+                "hub": layer_url(key, robot),
             }
             for key in sources
         },
@@ -203,6 +191,18 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
 def source_of(path: Path) -> str:
     """Return the source key of a motion file, which is named ``<source>_<clip>``."""
     return path.stem.split("_", 1)[0]
+
+
+def layer_url(source: str, robot: str) -> str | None:
+    """Return the URL of the robot layer of ``source`` on the Hub, or None if it has none.
+
+    The Rerun web viewer opens a motion at this URL. The viewer cannot read a private repo,
+    so a source of a private Hub dataset has no URL.
+    """
+    dataset = hub_dataset_of(source)
+    if dataset is None or dataset.private:
+        return None
+    return f"https://huggingface.co/datasets/{dataset.repo_id}/resolve/main/{robot}/"
 
 
 class Packs:

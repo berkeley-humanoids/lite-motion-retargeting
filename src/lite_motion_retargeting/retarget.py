@@ -54,7 +54,6 @@ from .common import (
     G1_JOINT_NAMES,
     G1_TO_LITE,
     IK_BODY_PAIRS,
-    PUBLIC_SOURCE,
     ROBOT_BODIES,
     SOURCE_BODIES,
     body_id,
@@ -72,6 +71,7 @@ from .common import (
     sole_points,
     world_poses,
 )
+from .hub import hub_dataset_of
 from .human import HUMAN_BODIES, HumanClip
 from .mapping import (
     FEET,
@@ -597,7 +597,7 @@ def main(
     written = [blueprint, asset]
     # The Hub card links each published motion into the web viewer, which cannot load the
     # asset, so a published motion carries its own geometry.
-    geometry = source == PUBLIC_SOURCE
+    geometry = hub_dataset_of(source) is not None
 
     failed = []
     metrics = []

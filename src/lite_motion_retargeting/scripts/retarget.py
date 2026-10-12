@@ -90,9 +90,10 @@ def _worker_retarget(
 
 def print_metrics(rows: list[dict[str, float]]) -> None:
     """Print the mean of each metric over ``rows``, one clip per row."""
-    print(f"\nMetrics, mean over {len(rows)} clips:")
+    print(f"\nMetrics, mean over {len(rows)} clips, without the clips where a metric is NaN:")
+    width = max(map(len, rows[0]))
     for key in rows[0]:
-        print(f"  {key:<16s} {np.mean([row[key] for row in rows]):8.2f}")
+        print(f"  {key:<{width}s} {np.nanmean([row[key] for row in rows]):8.2f}")
 
 
 def retarget(

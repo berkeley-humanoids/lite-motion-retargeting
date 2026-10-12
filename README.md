@@ -307,9 +307,22 @@ numbers as its `metrics` property, and a run prints their mean:
 | `foot_error_cm`, `hand_error_cm` | Mean distance from a goal to its link |
 | `foot_angle_deg`, `hand_angle_deg` | Mean angle between a goal and its link |
 | `foot_slide_cm_s` | Mean horizontal speed of the touching sole point, while the source stands on that foot |
+| `foot_slide_median_cm_s` | Median of the same speed |
+| `near_floor_slide_cm_s`, `near_floor_slide_median_cm_s` | Mean and median of the same speed, while the sole is within 1 cm of the floor, whatever the source does |
 | `planted_gap_cm` | Mean distance from the lowest sole point to the floor, while the source stands on that foot |
 | `penetration_cm` | 95th percentile, over frames, of the deepest sole point below the floor |
 | `joint_speed_max` | Fastest joint between two frames, rad/s |
+
+The lowest sole point is exact: `kinematics.sole` takes the collision capsules of each foot
+as segments with a radius, and boxes as their corners. A metric over an empty set, such as
+the slide of a motion that never touches the floor, is NaN.
+
+The IK plants the feet where the source stands, and `foot_slide_cm_s` measures the slide
+on the same frames. Thus `foot_slide_cm_s` measures what the IK aims for. A method that
+does not plant the feet, such as ReActor, can still keep the feet still where the source
+stands, so the metric applies to it too. `near_floor_slide_cm_s` uses the height of the
+robot sole instead, so it does not depend on the mask of the source. But height alone
+decides it, so it also counts a swing foot that passes close to the floor.
 
 The human path and the G1 path aim at different goals, so you cannot compare their goal
 errors. You can compare the floor metrics and the joint speed. This table gives their

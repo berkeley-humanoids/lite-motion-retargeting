@@ -23,7 +23,7 @@ The page is static. `collections.json` lists the dataset folders, or collections
 page shows. The page reads each motion directly from the Hub, as a byte range of a pack.
 To also see the private collections that your account can read, sign in with Hugging Face.
 
-`scripts/publish.py` of [Lite-Motion-Retargeting][retarget] writes this Space. Change the
+`uv run publish` of [Lite-Motion-Retargeting][retarget] writes this Space. Change the
 files there, not here.
 
 [retarget]: https://github.com/Berkeley-Humanoids/Lite-Motion-Retargeting

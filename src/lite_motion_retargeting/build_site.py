@@ -25,9 +25,9 @@ The index lists the joints of each joint group in ``groups`` and of each Lite va
 ``robots``. Thus the page can show which joints of each robot a motion can train.
 
 Usage:
-    uv run scripts/build_site.py
-    uv run scripts/build_site.py --sources lafan1 kimodo kimodolh2 kimodolh3  # what others may see
-    uv run scripts/serve.py                            # then open http://localhost:8000
+    uv run build-site
+    uv run build-site --sources lafan1 kimodo kimodolh2 kimodolh3  # what others may see
+    uv run serve                            # then open http://localhost:8000
 """
 
 import gzip
@@ -35,7 +35,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -50,14 +49,19 @@ from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import CACHE_ROOT, DATASET_REPO_ID, G1_DRIVEN, PUBLIC_SOURCE, lite_urdf_path  # noqa: E402
-from sources import SOURCES, clip_key, motion_name  # noqa: E402
-from store import BASE_LAYER  # noqa: E402
+from .common import (
+    CACHE_ROOT,
+    DATASET_REPO_ID,
+    DATASET_ROOT,
+    G1_DRIVEN,
+    PUBLIC_SOURCE,
+    SITE_ROOT,
+    lite_urdf_path,
+)
+from .sources import SOURCES, clip_key, motion_name
+from .store import BASE_LAYER
 
-REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-DATASET_ROOT: Path = REPO_ROOT / "dataset"
-SITE_DATA: Path = REPO_ROOT / "site" / "data"
+SITE_DATA: Path = SITE_ROOT / "data"
 
 #: Seconds. A card loops this much of its motion, where the joints move most.
 PREVIEW_SECONDS: float = 4.0
@@ -99,7 +103,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
         sources: The keys of ``sources.SOURCES`` to include. The default is every source.
             For a site that others can open, include only ``lafan1`` and the ``kimodo``
             sources. The licenses of the other sources do not let you share their motions.
-        out: The directory to write. ``scripts/publish.py`` writes its upload to a different
+        out: The directory to write. ``uv run publish`` writes its upload to a different
             directory, so the local site keeps every source.
     """
     urdf = lite_urdf_path()
@@ -111,7 +115,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
         raise SystemExit(f"Unknown sources {unknown}. Choose from {sorted(SOURCES)}.")
     paths = sorted(path for path in layer.glob("*.rrd") if source_of(path) in sources)
     if not paths:
-        raise SystemExit(f"No motions of {sources} under {layer}. Run scripts/retarget.py.")
+        raise SystemExit(f"No motions of {sources} under {layer}. Run `uv run retarget`.")
     # The page lists a source only if it has a motion to show.
     present = {source_of(path) for path in paths}
     sources = [source for source in sources if source in present]
@@ -193,7 +197,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     data_mb = sum(path.stat().st_size for path in out.rglob("*") if path.is_file()) / 1e6
     print(f"{len(motions)} motions of {', '.join(sources)} -> {out}")
     print(f"  {data_mb:.1f} MB in {len(packs.names)} packs, and {mesh_mb:.1f} MB robot meshes")
-    print("  serve: uv run scripts/serve.py")
+    print("  serve: uv run serve")
 
 
 def source_of(path: Path) -> str:
@@ -449,5 +453,6 @@ def _read_stl(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return vertices.astype(np.float64), triangles.reshape(-1, 3)
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Run :func:`main` with the options on the command line."""
     tyro.cli(main)

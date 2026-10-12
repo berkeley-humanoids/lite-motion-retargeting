@@ -34,8 +34,18 @@ PUBLIC_SOURCE: str = "lafan1"
 #: dataset repo.
 SPACE_REPO_ID: str = "Berkeley-Humanoids/Lite-Motions"
 
+#: The clone of this repo. The package runs as an editable install of its clone, and keeps
+#: its data in the clone, beside the code.
+REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+
 #: The local copy of each source and of the G1 model, one directory each.
-CACHE_ROOT: Path = Path(__file__).resolve().parent.parent / ".cache"
+CACHE_ROOT: Path = REPO_ROOT / ".cache"
+
+#: The store: a directory per layer, and a file per motion. See ``store.py``.
+DATASET_ROOT: Path = REPO_ROOT / "dataset"
+
+#: The motion browser, and in ``data/`` the motions that it plays.
+SITE_ROOT: Path = REPO_ROOT / "site"
 
 #: A point of a source foot can plant the foot only below this speed, in m/s. See
 #: :func:`planted`.
@@ -176,7 +186,7 @@ def lite_urdf_path() -> Path:
 
 
 def load_g1_model() -> mujoco.MjModel:
-    """Load the Unitree G1 URDF that ``scripts/download.py`` puts in the cache.
+    """Load the Unitree G1 URDF that ``uv run download`` puts in the cache.
 
     The URDF declares ``<compiler meshdir="meshes"/>`` and also gives each mesh as
     ``meshes/foo.STL``, so MuJoCo would look for ``meshes/meshes/foo.STL``. The loader sets
@@ -186,7 +196,7 @@ def load_g1_model() -> mujoco.MjModel:
     urdf = G1_URDF_PATH
     if not urdf.exists():
         raise FileNotFoundError(
-            f"Cannot find the G1 URDF at {urdf}. Run scripts/download.py first."
+            f"Cannot find the G1 URDF at {urdf}. Run `uv run download` first."
         )
     text = re.sub(r'meshdir="[^"]*"', 'meshdir="."', urdf.read_text())
     assets = {f"meshes/{p.name}": p.read_bytes() for p in (urdf.parent / "meshes").glob("*.STL")}

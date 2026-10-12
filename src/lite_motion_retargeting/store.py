@@ -64,7 +64,8 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from common import quat_mul
+
+from .common import quat_mul
 
 #: Every motion uses this id, so a directory of motions registers as one dataset.
 APPLICATION_ID: str = "lite-motion-tracking"

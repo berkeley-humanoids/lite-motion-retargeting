@@ -4,8 +4,8 @@ The page reads each motion as a byte range of a pack. ``python -m http.server`` 
 a range request with the whole file, but this server answers it with the range.
 
 Usage:
-    uv run scripts/serve.py              # then open http://localhost:8000
-    uv run scripts/serve.py --port 8080
+    uv run serve              # then open http://localhost:8000
+    uv run serve --port 8080
 """
 
 import io
@@ -13,11 +13,10 @@ import os
 import re
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import tyro
 
-SITE_ROOT: Path = Path(__file__).resolve().parent.parent / "site"
+from .common import SITE_ROOT
 
 
 class RangeRequestHandler(SimpleHTTPRequestHandler):
@@ -58,5 +57,6 @@ def main(port: int = 8000) -> None:
     server.serve_forever()
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Run :func:`main` with the options on the command line."""
     tyro.cli(main)

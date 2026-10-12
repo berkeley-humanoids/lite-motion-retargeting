@@ -23,21 +23,19 @@ Both paths then share:
 
 One clip becomes two layers of one motion in ``dataset/``: ``base/``, the source clip
 as published at its own rate, and ``lite_pro/``, at the 50 Hz control rate, with the
-joints that the IK reached and the goal that it aimed at. ``scripts/sources.py`` lists
-the sources, ``scripts/store.py`` defines the store, and ``scripts/publish.py`` uploads
-it.
+joints that the IK reached and the goal that it aimed at. ``sources.py`` lists the
+sources, ``store.py`` defines the store, and ``uv run publish`` uploads it.
 
 Usage:
-    uv run scripts/retarget.py
-    uv run scripts/retarget.py --clip 'walk1_subject1'
-    uv run scripts/retarget.py --source lafan1bvh --clip 'walk1_subject1' --validate-only
-    uv run scripts/retarget.py --source amass --clip '^CMU/'
-    uv run scripts/retarget.py --workers -1          # every clip, every core
+    uv run retarget
+    uv run retarget --clip 'walk1_subject1'
+    uv run retarget --source lafan1bvh --clip 'walk1_subject1' --validate-only
+    uv run retarget --source amass --clip '^CMU/'
+    uv run retarget --workers -1          # every clip, every core
 """
 
 import os
 import re
-import sys
 from multiprocessing import get_context
 from pathlib import Path
 from typing import NamedTuple
@@ -48,9 +46,9 @@ import tyro
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (  # noqa: E402
+from .common import (
     CACHE_ROOT,
+    DATASET_ROOT,
     FPS,
     G1_DRIVEN,
     G1_JOINT_NAMES,
@@ -74,8 +72,8 @@ from common import (  # noqa: E402
     sole_points,
     world_poses,
 )
-from human import HUMAN_BODIES, HumanClip  # noqa: E402
-from mapping import (  # noqa: E402
+from .human import HUMAN_BODIES, HumanClip
+from .mapping import (
     FEET,
     LITE_PAIRS,
     calibrate,
@@ -85,11 +83,8 @@ from mapping import (  # noqa: E402
     plant,
     solve_ik,
 )
-from sources import SOURCES, clip_key, motion_name  # noqa: E402
-from store import write_asset, write_base_layer, write_blueprint, write_robot_layer  # noqa: E402
-
-#: The store that a run writes by default, one directory per layer.
-DATASET_ROOT: Path = Path(__file__).resolve().parent.parent / "dataset"
+from .sources import SOURCES, clip_key, motion_name
+from .store import write_asset, write_base_layer, write_blueprint, write_robot_layer
 
 #: The number of clips that a worker retargets before a new process replaces it. Rerun 0.38
 #: keeps two threads alive for every recording that it opened, and a motion opens two. A
@@ -574,7 +569,7 @@ def main(
     if not paths:
         raise SystemExit(
             f"No clips to retarget under {clip_dir} (clip={clip!r}). "
-            f"Run scripts/download.py --source {source} first."
+            f"Run `uv run download --source {source}` first."
         )
     names = [motion_name(source, clip_dir, p) for p in paths]
     if len(set(names)) != len(names):
@@ -644,5 +639,6 @@ def main(
     print(f"  view: uv run rerun {out}/*/{names[0]}.rrd --asset {asset} {blueprint}")
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Run :func:`main` with the options on the command line."""
     tyro.cli(main)

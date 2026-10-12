@@ -1,22 +1,22 @@
 """Upload the motion store to the Hugging Face Hub, and the motion browser that plays it.
 
 The Hub repo mirrors the LAFAN1 motions of ``dataset/``: a directory per layer, a file per
-motion, and ``DATASET_CARD.md`` as the card of the repo. ``scripts/retarget.py`` writes the
-store, and this script only uploads it. Beside the layers, ``web/`` holds the same motions
-in the form that the browser plays. ``scripts/build_site.py`` writes ``web/`` from the store.
+motion, and ``DATASET_CARD.md`` as the card of the repo. ``uv run retarget`` writes the
+store, and this step only uploads it. Beside the layers, ``web/`` holds the same motions
+in the form that the browser plays. ``build_site.py`` writes ``web/`` from the store.
 
-The card is a template. This script replaces its ``<!-- motions -->`` marker with an index
+The card is a template. This step replaces its ``<!-- motions -->`` marker with an index
 of the motions in the same commit, so the index cannot name a file that the repo does not
 hold.
 
 The browser page, ``site/``, goes to a static Space. Its ``collections.json`` points at
-``web/`` as of the commit that this script just made. Thus the Space plays the same
+``web/`` as of the commit that this step just made. Thus the Space plays the same
 motions until the next publish.
 
 Usage:
-    uv run scripts/publish.py --dry-run
-    uv run scripts/publish.py
-    uv run scripts/publish.py --clear   # also delete the other files in the repo
+    uv run publish --dry-run
+    uv run publish
+    uv run publish --clear   # also delete the other files in the repo
 
 To upload, log in with a token that can write to the namespace:
 
@@ -24,7 +24,6 @@ To upload, log in with a token that can write to the namespace:
 """
 
 import json
-import sys
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
@@ -32,17 +31,20 @@ from urllib.parse import quote
 import tyro
 from huggingface_hub import CommitOperationAdd, DatasetCard, HfApi
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_site import VIEWER  # noqa: E402
-from build_site import main as build_site  # noqa: E402
-from common import DATASET_REPO_ID, PUBLIC_SOURCE, SPACE_REPO_ID  # noqa: E402
-from store import BASE_LAYER  # noqa: E402
+from .build_site import VIEWER
+from .build_site import main as build_site
+from .common import (
+    DATASET_REPO_ID,
+    DATASET_ROOT,
+    PUBLIC_SOURCE,
+    REPO_ROOT,
+    SITE_ROOT,
+    SPACE_REPO_ID,
+)
+from .store import BASE_LAYER
 
-REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-DATASET_ROOT: Path = REPO_ROOT / "dataset"
 CARD_PATH: Path = REPO_ROOT / "DATASET_CARD.md"
 SPACE_CARD_PATH: Path = REPO_ROOT / "SPACE_CARD.md"
-SITE_ROOT: Path = REPO_ROOT / "site"
 
 #: The directory of the browser data, in ``dataset/`` and in the repo.
 WEB_DIR: str = "web"
@@ -78,11 +80,11 @@ def main(
 
     Args:
         repo_id: The Hub dataset repo to write to.
-        space_id: The static Space to write the page to. The script creates it if it does
+        space_id: The static Space to write the page to. The step creates it if it does
             not exist.
         clear: Delete each file in the repo that this upload does not replace. Use this flag
             after you rename or remove a clip, to delete the old file.
-        dry_run: Print a summary of the upload, and upload nothing. The script still
+        dry_run: Print a summary of the upload, and upload nothing. The step still
             writes the card to ``dataset/README.md`` and the browser data to
             ``dataset/web/``, so you can examine both first.
     """
@@ -92,7 +94,7 @@ def main(
         or (path.suffix == ".rrd" and path.stem.startswith(f"{PUBLIC_SOURCE}_"))
     )
     if not files:
-        raise SystemExit(f"No motions under {DATASET_ROOT}. Run scripts/retarget.py first.")
+        raise SystemExit(f"No motions under {DATASET_ROOT}. Run `uv run retarget` first.")
 
     # The card goes up in the same commit as the data, so the card always matches the files
     # of the repo. `DatasetCard` parses the YAML front matter, so a broken card fails here,
@@ -157,5 +159,6 @@ def publish_page(api: HfApi, space_id: str, data_url: str) -> None:
     print(f"Pushed the page to https://huggingface.co/spaces/{space_id}")
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Run :func:`main` with the options on the command line."""
     tyro.cli(main)

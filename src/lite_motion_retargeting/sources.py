@@ -28,8 +28,9 @@ from typing import NamedTuple
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from common import G1_JOINT_NAMES
-from human import HumanClip, load_lafan1_bvh
+
+from .common import G1_JOINT_NAMES
+from .human import HumanClip, load_lafan1_bvh
 
 #: A G1 clip: the arrays that the module docstring lists, by name.
 Motion = dict[str, np.ndarray]

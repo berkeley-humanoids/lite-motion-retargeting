@@ -21,7 +21,10 @@ it again before you publish it.
 from pathlib import Path
 from typing import NamedTuple
 
-from .common import REPO_ROOT
+from . import REPO_ROOT
+
+#: The Rerun web viewer. It opens the recording at the URL that follows this prefix.
+VIEWER: str = "https://rerun.io/viewer?url="
 
 #: The templates of the cards, one per Hub dataset, and one for the Space.
 CARD_ROOT: Path = REPO_ROOT / "cards"
@@ -34,7 +37,7 @@ class HubDataset(NamedTuple):
     repo_id: str
     #: The keys of ``sources.SOURCES`` that the repo holds.
     sources: tuple[str, ...]
-    #: The template of the card of the repo. See ``publish.py``.
+    #: The template of the card of the repo. See ``scripts/publish.py``.
     card: Path
     #: Make the repo private. Only the accounts that can read the repo see its motions, on
     #: the Hub and in the Space.
@@ -61,3 +64,15 @@ def hub_dataset_of(source: str) -> HubDataset | None:
     if len(holders) > 1:
         raise ValueError(f"{len(holders)} Hub datasets hold {source!r}. A source goes to one at most.")
     return holders[0] if holders else None
+
+
+def layer_url(source: str, robot: str) -> str | None:
+    """Return the URL of the robot layer of ``source`` on the Hub, or None if it has none.
+
+    The Rerun web viewer opens a motion at this URL. The viewer cannot read a private repo,
+    so a source of a private Hub dataset has no URL.
+    """
+    dataset = hub_dataset_of(source)
+    if dataset is None or dataset.private:
+        return None
+    return f"https://huggingface.co/datasets/{dataset.repo_id}/resolve/main/{robot}/"

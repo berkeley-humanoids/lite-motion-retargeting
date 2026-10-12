@@ -3,7 +3,7 @@
 ``hub.py`` lists the Hub datasets. Each Hub dataset repo mirrors the motions of its
 sources in ``dataset/``: a directory per layer, a file per motion, and its card. Beside
 the layers, ``web/`` holds the same motions in the form that the browser plays.
-``uv run retarget`` writes the store, and ``build_site.py`` writes ``web/`` from it. This
+``uv run retarget`` writes the store, and ``browser.py`` writes ``web/`` from it. This
 step only uploads them.
 
 The card is a template in ``cards/``. This step replaces its ``<!-- motions -->`` marker
@@ -42,11 +42,11 @@ from huggingface_hub import (
 from huggingface_hub.errors import RepositoryNotFoundError
 from rerun.chunk import RrdReader
 
-from .build_site import VIEWER, source_of
-from .build_site import main as build_site
-from .common import DATASET_ROOT, SITE_ROOT
-from .hub import HUB_DATASETS, SPACE_CARD, SPACE_REPO_ID
-from .store import BASE_LAYER
+from .. import DATASET_ROOT, SITE_ROOT
+from ..browser import build as build_site
+from ..hub import HUB_DATASETS, SPACE_CARD, SPACE_REPO_ID, VIEWER
+from ..sources import source_of
+from ..store import BASE_LAYER
 
 #: The directory of the browser data in a Hub dataset repo.
 WEB_DIR: str = "web"
@@ -62,7 +62,7 @@ PAGE_FILES: tuple[str, ...] = ("index.html", "app.js", "style.css")
 MOTIONS_MARKER: str = "<!-- motions -->"
 
 
-def main(
+def publish(
     datasets: tuple[str, ...] = tuple(HUB_DATASETS),
     clear: bool = False,
     dry_run: bool = False,
@@ -203,6 +203,6 @@ def _has_geometry(path: Path) -> bool:
     return any("/visual_geometries/" in chunk.entity_path for chunk in RrdReader(path).stream())
 
 
-def cli() -> None:
-    """Run :func:`main` with the options on the command line."""
-    tyro.cli(main)
+def main() -> None:
+    """Run :func:`publish` with the options on the command line."""
+    tyro.cli(publish)

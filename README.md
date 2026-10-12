@@ -21,7 +21,7 @@ You can [open one in a browser][viewer], or browse all of them in the
 | `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | No |
 | `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | No |
 
-`src/lite_motion_retargeting/sources.py` defines each source and its loader. The `amass`
+`src/lite_motion_retargeting/sources/` defines each source and its loader. The `amass`
 and `motiondecode` motions stay in your local store, `dataset/`, for training. Of the
 other sources, `uv run publish` uploads only `lafan1`. See
 [Publish to the Hub](#publish-to-the-hub).
@@ -36,7 +36,7 @@ files on request, and Kimodo generated its clips on the G1 directly.
 `kimodo` is not motion capture. NVIDIA's Kimodo model generated each clip from a text
 prompt, such as "a person throwing boxing punches". Then a tracking policy played the clip
 on a simulated G1. Each clip is 4 s long, and its category is its prompt. `kimodo` ships
-as LeRobot shards, and `download.py` splits them into one file per clip.
+as LeRobot shards, and `uv run download` splits them into one file per clip.
 
 `kimodolh2` and `kimodolh3` come from the same model and policy, but each prompt chains
 several actions, as in "combat drill: kick → walk → sidestep". A v2 clip chains 3 to 8
@@ -137,11 +137,11 @@ uv run build-site                      # dataset/ -> site/data/
 uv run serve                           # then open http://localhost:8000
 ```
 
-`build_site.py` reads the robot layer of each motion, which is the layer that training
+`uv run build-site` reads the robot layer of each motion, which is the layer that training
 reads. It writes the layer for the page as float32 rows, with the motions end to end in a
 few packs per source. The page loads the robot meshes once. It reads a motion only when
 the card of that motion comes into view, as a byte range of its pack. Serve the page with
-`serve.py`, or with another server that answers range requests, such as Caddy.
+`uv run serve`, or with another server that answers range requests, such as Caddy.
 `python -m http.server` answers a range request with the whole file.
 
 `--sources lafan1` builds a page with LAFAN1 only. For a page that other people can reach,
@@ -171,29 +171,30 @@ it. The page merges the collections into one list, and draws the robot of the fi
 
 ### The package
 
+The package, `src/lite_motion_retargeting/`, follows the layout of
+[mjlab](https://github.com/mujocolab/mjlab). `scripts/` holds the steps, and the other
+modules are the library that the steps share:
+
 | Module | What it does |
 |---|---|
-| `download.py` | Downloads the G1 model into `.cache/g1/`, and a source into `.cache/<source>/`. |
-| `retarget.py` | Retargets each clip, measures it, and writes its two layers under `dataset/`. |
-| `sources.py` | Defines the sources, the loader that reads the clips of each source, and the rule that names a motion. |
-| `human.py` | Defines the human skeleton that every human source maps onto, and reads LAFAN1 BVH files. |
-| `mapping.py` | Builds the goal of each Lite link from a human pose, plants the feet, and solves the IK that reaches the goals. |
-| `reactor.py` | Retargets the motions of a store again, in physics, with the RL method of ReActor. See [ReActor](#reactor). |
+| `scripts/` | A module per command: `download.py`, `retarget.py`, `reactor.py`, `build_site.py`, `serve.py` and `publish.py`. `pyproject.toml` lists the commands. |
+| `sources/` | Defines the sources and the rule that names a motion. `g1.py` reads the G1 sources. `human.py` defines the human skeleton that every human source maps onto, and reads LAFAN1 BVH files. |
+| `retargeting/` | Retargets one clip, grounds it, and measures it. `g1.py` is the G1 path. `human.py` builds the goal of each Lite link from a human pose, plants the feet, and solves the IK that reaches the goals. |
+| `reactor/` | The mjlab environment of ReActor: its terms in `mdp.py`, its configs in `env_cfg.py`, and the motions that it reads in `library.py`. See [ReActor](#reactor). |
+| `robots.py` | Loads the Lite and G1 models, and names their joints and bodies. |
+| `kinematics.py` | Resampling, forward kinematics, the soles, and foot contacts. |
 | `store.py` | Defines the file format. |
+| `browser.py` | Writes the motions and the robot meshes for the page. |
 | `hub.py` | Lists the Hub datasets, and names the Space. |
-| `publish.py` | Uploads each Hub dataset with its card and its page data. Then uploads the page to the Space. |
-| `build_site.py` | Writes the motions and the robot meshes for the page into `site/data/`. |
-| `serve.py` | Serves `site/` on this machine, and answers range requests. |
-| `common.py` | Holds the G1 joint table, the model loaders, resampling, forward kinematics, the soles, and foot contacts. |
 
-`retarget.py` takes `--source <name>`, `--clip <regex>`, `--no-ik`, `--ik-iters N`,
+`uv run retarget` takes `--source <name>`, `--clip <regex>`, `--no-ik`, `--ik-iters N`,
 `--workers N`, `--out <dir>` and `--validate-only`. `--out` writes the store to another
 directory. `--validate-only` prints the metrics of the first clip and writes nothing. The
 regex of `--clip` matches the path of a clip below the clip directory of its source,
 without the suffix, such as `CMU/07/07_01_poses_120_jpos`. The motion name comes from the
 same path: `amass_CMU_07_07_01_poses_120_jpos`.
 
-`publish.py` takes `--datasets <name>...`, `--clear` and `--dry-run`, as
+`uv run publish` takes `--datasets <name>...`, `--clear` and `--dry-run`, as
 [Publish to the Hub](#publish-to-the-hub) shows.
 
 ### Cost
@@ -214,17 +215,17 @@ are:
 | `kimodolh3` | 9,941 | 118 | 104 GB | 3.5 GB |
 | All | 139,693 | 1,234 | 1.37 TB | 37.6 GB |
 
-One MotionDecode clip is empty upstream. On 128 cores, `retarget.py` took 3 h 40 min for
-64,224 MotionDecode clips. `build_site.py` takes about 45 min for all sources.
+One MotionDecode clip is empty upstream. On 128 cores, `uv run retarget` took 3 h 40 min
+for 64,224 MotionDecode clips. `uv run build-site` takes about 45 min for all sources.
 
 The store holds the 9 MB robot geometry once, in `dataset/assets/lite_pro.rrd`.
 `rerun --asset` attaches the geometry to the motion that you open. Only the native viewer
-loads assets. The card of a Hub dataset opens a motion in the web viewer, so each motion of
-a Hub dataset carries its own copy of the geometry.
+loads assets. The card of a Hub dataset opens a motion in the web viewer, so each motion
+of a Hub dataset carries its own copy of the geometry.
 
 ## How a clip is retargeted
 
-A source runs at 30 to 250 Hz. `retarget.py` writes every motion at 50 Hz, the control
+A source runs at 30 to 250 Hz. `uv run retarget` writes every motion at 50 Hz, the control
 rate of the training environment. It resamples the source first, so the IK solves every
 frame that reaches the file. As a result, the body poses stay the exact kinematics of the
 joints beside them. The loader of the source decides which of two paths a clip takes: the
@@ -232,22 +233,22 @@ human path or the G1 path.
 
 ### A human clip
 
-1. **One skeleton.** `human.py` reads the clip into the world poses of one human skeleton.
-   The skeleton follows the keypoints of the Lite conventions: pelvis, hips, knees, feet,
-   toes, waist, chest, neck, head, shoulders, elbows and hands. Each rotation is
-   rest-normalized: it is identity when the body stands in a T-pose that faces +x. Thus, a
-   new format needs only a reader.
-2. **Goals.** `mapping.goals` builds a goal skeleton with the proportions of Lite and the
-   joint rotations of the human. Its pelvis follows the human pelvis, scaled by the ratio
-   of the two pelvis heights. Every other joint hangs from the joint above it by the Lite
-   segment between them, and that segment turns as the human segment turns. Each Lite link
-   in `mapping.LITE_PAIRS` gets a goal pose: the pelvis, thighs, shins, feet, chest, head,
-   upper arms, forearms and hands.
+1. **One skeleton.** `sources/human.py` reads the clip into the world poses of one human
+   skeleton. The skeleton follows the keypoints of the Lite conventions: pelvis, hips,
+   knees, feet, toes, waist, chest, neck, head, shoulders, elbows and hands. Each rotation
+   is rest-normalized: it is identity when the body stands in a T-pose that faces +x.
+   Thus, a new format needs only a reader.
+2. **Goals.** `retargeting.human.goals` builds a goal skeleton with the proportions of
+   Lite and the joint rotations of the human. Its pelvis follows the human pelvis, scaled
+   by the ratio of the two pelvis heights. Every other joint hangs from the joint above it
+   by the Lite segment between them, and that segment turns as the human segment turns.
+   Each Lite link in `retargeting.human.LITE_PAIRS` gets a goal pose: the pelvis, thighs,
+   shins, feet, chest, head, upper arms, forearms and hands.
 3. **Foot planting.** A skeleton with other proportions does not step where the human
-   steps. `common.planted` finds the frames where a human foot stands on the floor, from
-   the speed and height of its ankle and toe. Then `mapping.plant` shifts the goal
-   skeleton, frame by frame, so that a planted foot keeps its sole point in place and on
-   the floor. It also lifts a foot whose sole would dip through the floor.
+   steps. `kinematics.planted` finds the frames where a human foot stands on the floor,
+   from the speed and height of its ankle and toe. Then `retargeting.human.plant` shifts
+   the goal skeleton, frame by frame, so that a planted foot keeps its sole point in place
+   and on the floor. It also lifts a foot whose sole would dip through the floor.
 4. **IK.** Per-frame [`mink`](https://github.com/kevinzakka/mink) IK with a free base
    moves Lite onto the goals, in position and orientation. Each frame starts from the
    solution of the frame before. The thigh, shin, upper arm and forearm goals pin the
@@ -263,7 +264,7 @@ policy that tracks the goals in simulation, can use them in place of the IK.
 ### A G1 clip
 
 1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
-   `common.G1_TO_LITE`.
+   `retargeting.g1.G1_TO_LITE`.
 2. **IK refinement.** Per-frame IK moves the result toward the pelvis-local poses of both
    feet and both hands of the G1, in position and orientation. A per-DoF posture cost
    holds the solution near the result of step 1. Thus, this step adjusts the pose but does
@@ -273,22 +274,23 @@ policy that tracks the goals in simulation, can use them in place of the IK.
 
 **Grounding.** A constant shift of the pelvis height per clip puts the lowest point of the
 Lite soles on the floor in the median frame. Each source puts the G1 at its own height,
-and AMASS puts the pelvis at the floor. Thus, `retarget.py` measures the shift on the Lite
-result. The median ignores the few frames where a heel or a toe dips through the floor.
+and AMASS puts the pelvis at the floor. Thus, `retargeting/` measures the shift on the
+Lite result. The median ignores the few frames where a heel or a toe dips through the
+floor.
 
 **Driven joints.** A source drives only the Lite joints that it has data for, and every
-other joint holds its default, 0. A G1 source drives the 29 joints of `common.G1_TO_LITE`,
-and has no neck, ankle yaw or fingers. A human source drives every joint between the
-pelvis and a link with a goal: 34 joints for LAFAN1, which has no fingers. The robot layer
-keeps the driven joints as `active_joint_names`. Thus, a motion with fewer driven joints
-can still train the robot that it covers, such as a G1 motion for the legs of the Lite
-Biped.
+other joint holds its default, 0. A G1 source drives the 29 joints of
+`retargeting.g1.G1_TO_LITE`, and has no neck, ankle yaw or fingers. A human source drives
+every joint between the pelvis and a link with a goal: 34 joints for LAFAN1, which has no
+fingers. The robot layer keeps the driven joints as `active_joint_names`. Thus, a motion
+with fewer driven joints can still train the robot that it covers, such as a G1 motion for
+the legs of the Lite Biped.
 
 The page in `site/` shows the driven joints of each motion, and how many joints of each
 Lite variant the motion drives. The page also filters the motions by the joint groups that
 they drive.
 
-**Metrics.** `retarget.motion_metrics` measures every motion. The robot layer keeps the
+**Metrics.** `retargeting.motion_metrics` measures every motion. The robot layer keeps the
 numbers as its `metrics` property, and a run prints their mean:
 
 | Metric | What it measures |
@@ -317,8 +319,8 @@ the URDF of the same package. Thus, a new version of `lite-description` gives ne
 
 ## ReActor
 
-`reactor.py` retargets the motions of a store again, in physics, with the method of
-Disney's [ReActor](https://arxiv.org/abs/2605.06593). The IK of `retarget.py` ignores
+`uv run reactor` retargets the motions of a store again, in physics, with the method of
+Disney's [ReActor](https://arxiv.org/abs/2605.06593). The IK of `retargeting/` ignores
 mass, contact and torque. Thus, its motions can float, sink, slide, or ask a motor for
 more than the motor has. ReActor tracks the same goals with a policy in MuJoCo Warp,
 through mjlab, and the simulated motion is the retargeted motion:
@@ -332,7 +334,7 @@ through mjlab, and the simulated motion is the retargeted motion:
    paper.
 3. **Export.** The policy plays each motion from its first frame to its end. The simulated
    joints become a robot layer of a new store, with the learned goals, the metrics of
-   `retarget.py`, and the peak and mean wrench. If the policy loses track of the goals,
+   `retargeting/`, and the peak and mean wrench. If the policy loses track of the goals,
    `export` cuts the motion into pieces, as described below.
 
 The simulation is ideal: a PD position actuator per joint with the armature and effort
@@ -341,7 +343,7 @@ randomization. ReActor makes reference motions. The policy that runs on the robo
 on these motions in
 [Lite-Motion-Tracking](https://github.com/Berkeley-Humanoids/Lite-Motion-Tracking).
 
-ReActor reads the robot layers of a store, so it runs on any source that `retarget.py`
+ReActor reads the robot layers of a store, so it runs on any source that `uv run retarget`
 wrote, human or G1. ReActor welds every joint that no motion drives, such as the fingers.
 The `reactor` extra adds mjlab, which pins MuJoCo to 3.11 for the whole project.
 
@@ -404,7 +406,7 @@ code.
 | Paper | Here | Why |
 |---|---|---|
 | PD targets, and a reset at the nominal pose with a ramp-in | PD targets around the IK solution, and a reset at the IK state | The IK solution exists, so the policy starts from it |
-| Offsets on the source body frames | Offsets on the goals of `mapping.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
+| Offsets on the source body frames | Offsets on the goals of `retargeting/human.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
 | Offset bounds of 0.5 | 0.1 m, 0.3 rad, 0.05 m | Lite is about 1 m tall |
 | Projected SGD on the offsets | Adam, then the projection | The paper gives no step size |
 

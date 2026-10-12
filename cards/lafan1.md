@@ -48,7 +48,7 @@ any set of them as one recording.
 | `base/<motion>.rrd` | The source clip as published, at 30 Hz: the 29 G1 joints, and the world poses that these joints put the G1 bodies at. It records provenance, so you can derive the motion again without the upstream dataset. |
 | `lite_pro/<motion>.rrd` | Everything the robot needs, at 50 Hz: the retargeted joints, the goal that its bodies track, and the URDF geometry that draws it. |
 | `blueprints/lite_pro.rbl` | The viewer layout. |
-| `web/` | The robot layer in the form that the [motion browser][browser] plays: `index.json.gz` lists the motions, `robot.json` and `robot.bin` draw the robot, and each pack under `packs/` holds float32 rows of motions end to end. `src/lite_motion_retargeting/build_site.py` of [Lite-Motion-Retargeting][retarget] documents the format. |
+| `web/` | The robot layer in the form that the [motion browser][browser] plays: `index.json.gz` lists the motions, `robot.json` and `robot.bin` draw the robot, and each pack under `packs/` holds float32 rows of motions end to end. `src/lite_motion_retargeting/browser.py` of [Lite-Motion-Retargeting][retarget] documents the format. |
 
 The robot layer is self-contained, and its joints reset the robot. `/lite_pro/goal/` holds
 the goal that the robot tracks, in the frame convention of the Lite links, so a reward

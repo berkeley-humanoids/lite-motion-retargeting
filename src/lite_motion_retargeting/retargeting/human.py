@@ -1,7 +1,7 @@
 """Map human motion onto Lite: the goal pose of each Lite link, and the IK that reaches it.
 
-Every retargeting backend shares this mapping. It turns the human bodies of ``human.py``
-into a goal pose for each Lite link in :data:`LITE_PAIRS`:
+Every retargeting backend shares this mapping. It turns the human bodies of
+``sources/human.py`` into a goal pose for each Lite link in :data:`LITE_PAIRS`:
 
 * **Calibration.** Both skeletons stand in the T-pose, facing +x. The scale is the ratio of
   their pelvis heights, and the rest pose of each Lite link comes from the model.
@@ -29,16 +29,10 @@ import numpy as np
 from lite_description import get_mjcf_path
 from scipy.ndimage import uniform_filter1d
 
-from .common import (
-    FPS,
-    Sole,
-    body_id,
-    joint_qpos_addr,
-    lowest_points,
-    quat_mul,
-    sole_points,
-)
-from .human import HUMAN_BODIES, HUMAN_PARENTS
+from ..kinematics import Sole, lowest_points, quat_mul, sole_points
+from ..robots import FEET, body_id, joint_qpos_addr
+from ..sources.human import HUMAN_BODIES, HUMAN_PARENTS
+from ..store import FPS
 
 #: Human body -> the Lite link at the joint that the body turns about. A toe has none.
 ANCHORS: dict[str, str] = {
@@ -91,9 +85,6 @@ LITE_PAIRS: dict[str, Pair] = {
     "right_elbow_pitch": Pair("right_elbow", 2.0, 1.0),
     "right_hand": Pair("right_hand", 5.0, 0.5),
 }
-
-#: The Lite bodies that stand on the floor.
-FEET: tuple[str, ...] = ("left_foot", "right_foot")
 
 #: Posture cost of each DoF. It only settles what the goals leave open.
 _POSTURE_COST: float = 1e-2
@@ -175,8 +166,8 @@ def driven_joints(lite: mujoco.MjModel) -> tuple[str, ...]:
 def goals(pos: np.ndarray, quat: np.ndarray, calibration: Calibration) -> tuple[np.ndarray, np.ndarray]:
     """Return the world goal pose of each link of :data:`LITE_PAIRS`, per frame.
 
-    ``pos`` ``(T, B, 3)`` and ``quat`` ``(T, B, 4)`` are human bodies as ``human.py`` defines
-    them. Returns ``(T, P, 3)`` positions and ``(T, P, 4)`` wxyz rotations.
+    ``pos`` ``(T, B, 3)`` and ``quat`` ``(T, B, 4)`` are human bodies as
+    ``sources/human.py`` defines them. Returns ``(T, P, 3)`` positions and ``(T, P, 4)`` wxyz rotations.
     """
     rotation = _matrices(quat)
     joints = {"pelvis": calibration.scale * pos[:, HUMAN_BODIES.index("pelvis")]}
@@ -197,7 +188,7 @@ def goals(pos: np.ndarray, quat: np.ndarray, calibration: Calibration) -> tuple[
 def plant(goal_pos: np.ndarray, goal_quat: np.ndarray, feet_planted: np.ndarray, foot_sole: Sole) -> np.ndarray:
     """Shift the goals of :func:`goals` so that a planted foot does not slide or leave the floor.
 
-    ``feet_planted`` ``(T, 2)`` tells which of :data:`FEET` the source stands on. Between two
+    ``feet_planted`` ``(T, 2)`` tells which of :data:`robots.FEET` the source stands on. Between two
     frames where a foot is planted, the lowest point of its sole moves as a point of the
     foot. The goals shift back by that slide, averaged over the planted feet. In a frame
     with a planted foot, the goals shift down by the height of the lowest sole point,

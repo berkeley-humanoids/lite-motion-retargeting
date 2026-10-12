@@ -24,12 +24,12 @@ dependencies = [
 reactor = ["mjlab>=1.6"]
 
 [project.scripts]
-download = "lite_motion_retargeting.download:cli"
-retarget = "lite_motion_retargeting.retarget:cli"
-reactor = "lite_motion_retargeting.reactor:cli"
-build-site = "lite_motion_retargeting.build_site:cli"
-serve = "lite_motion_retargeting.serve:cli"
-publish = "lite_motion_retargeting.publish:cli"
+download = "lite_motion_retargeting.scripts.download:main"
+retarget = "lite_motion_retargeting.scripts.retarget:main"
+reactor = "lite_motion_retargeting.scripts.reactor:main"
+build-site = "lite_motion_retargeting.scripts.build_site:main"
+serve = "lite_motion_retargeting.scripts.serve:main"
+publish = "lite_motion_retargeting.scripts.publish:main"
 
 [build-system]
 requires = ["hatchling"]

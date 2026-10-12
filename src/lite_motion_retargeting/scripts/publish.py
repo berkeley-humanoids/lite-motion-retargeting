@@ -1,14 +1,17 @@
 """Upload Hub datasets from the store, and the motion browser that plays them.
 
 ``hub.py`` lists the Hub datasets. Each Hub dataset repo mirrors the motions of its
-sources in ``dataset/``: a directory per layer, a file per motion, and its card. Beside
-the layers, ``web/`` holds the same motions in the form that the browser plays.
+sources in ``dataset/``, with a directory per source in each layer, and holds its card.
+Beside the layers, ``web/`` holds the same motions in the form that the browser plays.
 ``uv run retarget`` writes the store, and ``browser.py`` writes ``web/`` from it. This
 step only uploads them.
 
-The card is a template in ``cards/``. This step replaces its ``<!-- motions -->`` marker
-with an index of the motions. The card, the layers and ``web/`` go up in one commit, so
-the index cannot name a file that the repo does not hold.
+The step first writes the repo as it will be into ``dataset/hub/<name>/``: hard links to
+the files of the store, the card, and ``web/``. Then it uploads that directory. A large
+upload goes up in several commits, and running the step again resumes it.
+
+The card is a template in ``cards/``. If the card has a ``<!-- motions -->`` marker, this
+step replaces the marker with a table that links each motion into the Rerun web viewer.
 
 The browser page, ``site/``, goes to a static Space. Its ``collections.json`` lists the
 ``web/`` of each Hub dataset, as of the last commit to that repo. Thus the Space plays the
@@ -27,33 +30,32 @@ To upload, log in with a token that can write to the namespace:
 """
 
 import json
+import os
+import shutil
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
 import tyro
-from huggingface_hub import (
-    CommitOperationAdd,
-    CommitOperationDelete,
-    DatasetCard,
-    HfApi,
-    SpaceCard,
-)
+from huggingface_hub import CommitOperationAdd, DatasetCard, HfApi, SpaceCard
 from huggingface_hub.errors import RepositoryNotFoundError
 from rerun.chunk import RrdReader
 
 from .. import DATASET_ROOT, SITE_ROOT
 from ..browser import build as build_site
-from ..hub import HUB_DATASETS, SPACE_CARD, SPACE_REPO_ID, VIEWER
+from ..hub import HUB_DATASETS, SPACE_CARD, SPACE_REPO_ID, VIEWER, repo_dir
 from ..sources import source_of
 from ..store import BASE_LAYER
 
 #: The directory of the browser data in a Hub dataset repo.
 WEB_DIR: str = "web"
 
-#: Where this step writes the card and ``web/`` of each Hub dataset before the upload, a
-#: directory per Hub dataset.
+#: Where this step writes each Hub dataset repo before the upload, a directory per Hub
+#: dataset. It is in the store, so that it can hold hard links to the files of the store.
 STAGE_ROOT: Path = DATASET_ROOT / "hub"
+
+#: The Hub takes at most this many files in one directory of a repo.
+FOLDER_FILES: int = 10_000
 
 #: The files of the page. The Space gets its own ``collections.json``.
 PAGE_FILES: tuple[str, ...] = ("index.html", "app.js", "style.css")
@@ -94,49 +96,49 @@ def publish_dataset(api: HfApi, name: str, clear: bool, dry_run: bool) -> None:
     motions = [path for path in layers if path.parent.name != BASE_LAYER]
     if not motions:
         raise SystemExit(f"No motions of {', '.join(dataset.sources)} in {DATASET_ROOT}. Run `uv run retarget` first.")
-    if not _has_geometry(motions[0]):
+    if dataset.geometry and not _has_geometry(motions[0]):
         raise SystemExit(
             f"{motions[0]} has no robot geometry, so the Rerun web viewer cannot draw it. "
             f"Retarget the sources of {name!r} again: `uv run retarget` writes the geometry for a "
-            "source of a Hub dataset."
+            "source of a Hub dataset with geometry."
         )
 
-    # `DatasetCard` parses the YAML front matter, so a broken card fails here, not on the Hub.
+    files = {f"{repo_dir(path.parent.name, source_of(path))}/{path.name}": path for path in layers}
+    files |= {f"blueprints/{path.name}": path for path in DATASET_ROOT.glob("blueprints/*.rbl")}
+    if not dataset.geometry:
+        files |= {f"assets/{path.name}": path for path in DATASET_ROOT.glob("assets/*.rrd")}
+    folders = Counter(repo_path.rsplit("/", 1)[0] for repo_path in files if "/" in repo_path)
+    full = [folder for folder, count in folders.items() if count > FOLDER_FILES]
+    if full:
+        raise SystemExit(f"The Hub takes at most {FOLDER_FILES} files in a directory, and {full} hold more.")
+
     stage = STAGE_ROOT / name
-    stage.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(stage, ignore_errors=True)
+    for repo_path, path in files.items():
+        (stage / repo_path).parent.mkdir(parents=True, exist_ok=True)
+        os.link(path, stage / repo_path)
+    # `DatasetCard` parses the YAML front matter, so a broken card fails here, not on the Hub.
     card = dataset.card.read_text().replace(MOTIONS_MARKER, _motion_index(motions, dataset.repo_id))
     DatasetCard(card).save(stage / "README.md")
     build_site(sources=list(dataset.sources), out=stage / WEB_DIR)
 
-    files = {f"{path.parent.name}/{path.name}": path for path in layers}
-    files |= {f"blueprints/{path.name}": path for path in DATASET_ROOT.glob("blueprints/*.rbl")}
-    files |= {
-        path.relative_to(stage).as_posix(): path
-        for path in (stage / "README.md", *(stage / WEB_DIR).rglob("*")) if path.is_file()
-    }
-    folders = Counter(repo_path.split("/")[0] for repo_path in files if "/" in repo_path)
-    size_mb = sum(path.stat().st_size for path in files.values()) / 1e6
-    print(f"{name}: {len(files)} files, {size_mb:.1f} MB -> {dataset.repo_id}"
+    staged = [path for path in stage.rglob("*") if path.is_file()]
+    size_gb = sum(path.stat().st_size for path in staged) / 1e9
+    print(f"{name}: {len(staged)} files, {size_gb:.2f} GB -> {dataset.repo_id}"
           f"{' (private)' if dataset.private else ''}")
     for folder, count in sorted(folders.items()):
         print(f"  {folder}/  {count}")
-    print(f"  card indexes {len(motions)} motions")
+    print(f"  {WEB_DIR}/  {sum(1 for path in staged if path.relative_to(stage).parts[0] == WEB_DIR)}")
     if dry_run:
         return
 
     api.create_repo(dataset.repo_id, repo_type="dataset", private=dataset.private, exist_ok=True)
-    operations = [
-        CommitOperationAdd(path_in_repo=repo_path, path_or_fileobj=str(path))
-        for repo_path, path in files.items()
-    ]
-    if clear:
-        # A repo needs its `.gitattributes`, which the Hub writes.
-        stale = set(api.list_repo_files(dataset.repo_id, repo_type="dataset")) - set(files)
-        operations += [CommitOperationDelete(path_in_repo=path) for path in sorted(stale - {".gitattributes"})]
-    api.create_commit(
+    api.upload_folder(
         repo_id=dataset.repo_id,
         repo_type="dataset",
-        operations=operations,
+        folder_path=stage,
+        # The Hub keeps `.gitattributes`, which a repo needs, though the pattern matches it.
+        delete_patterns="*" if clear else None,
         commit_message=f"Publish {len(layers)} layer files from Lite-Motion-Retargeting",
     )
     print(f"Pushed to https://huggingface.co/datasets/{dataset.repo_id}")
@@ -193,7 +195,7 @@ def _motion_index(motions: list[Path], repo_id: str) -> str:
     rows = ["| Motion | View |", "|---|---|"]
     for path in motions:
         url = (f"https://huggingface.co/datasets/{repo_id}/resolve/main/"
-               f"{path.parent.name}/{path.name}")
+               f"{repo_dir(path.parent.name, source_of(path))}/{path.name}")
         rows.append(f"| `{path.stem}` | [Open in Rerun]({VIEWER}{quote(url, safe='')}) |")
     return "\n".join(rows)
 

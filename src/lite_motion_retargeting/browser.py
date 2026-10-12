@@ -1,4 +1,4 @@
-"""Write the motions and the robot that ``site/index.html`` plays into ``site/data/``.
+"""The motions and the robot that the motion browser, ``site/index.html``, plays.
 
 The page is static, so any file server that answers range requests can host it, the
 Hugging Face Hub included. The page shows the robot layer of each motion in ``dataset/``.
@@ -23,11 +23,6 @@ preview, and its card plays the whole motion.
 An entry also names the joints that its source drives, by a position in ``active_sets``.
 The index lists the joints of each joint group in ``groups`` and of each Lite variant in
 ``robots``. Thus the page can show which joints of each robot a motion can train.
-
-Usage:
-    uv run scripts/build_site.py
-    uv run scripts/build_site.py --sources lafan1 kimodo kimodolh2 kimodolh3  # what others may see
-    uv run scripts/serve.py                            # then open http://localhost:8000
 """
 
 import gzip
@@ -35,7 +30,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
@@ -44,20 +38,19 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import pyarrow as pa
-import tyro
 from lite_description import get_mjcf_path
 from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import CACHE_ROOT, DATASET_REPO_ID, G1_DRIVEN, PUBLIC_SOURCE, lite_urdf_path  # noqa: E402
-from sources import SOURCES, clip_key, motion_name  # noqa: E402
-from store import BASE_LAYER  # noqa: E402
+from . import CACHE_ROOT, DATASET_ROOT, SITE_ROOT
+from .hub import VIEWER, layer_url
+from .retargeting.g1 import G1_DRIVEN
+from .robots import lite_urdf_path
+from .sources import SOURCES, clip_key, motion_name, source_of
+from .store import BASE_LAYER
 
-REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-DATASET_ROOT: Path = REPO_ROOT / "dataset"
-SITE_DATA: Path = REPO_ROOT / "site" / "data"
+SITE_DATA: Path = SITE_ROOT / "data"
 
 #: Seconds. A card loops this much of its motion, where the joints move most.
 PREVIEW_SECONDS: float = 4.0
@@ -85,21 +78,14 @@ ROBOTS: dict[str, str] = {
     "lite_pro": "Lite Pro",
 }
 
-#: The Rerun web viewer. It opens the recording at the URL that follows this prefix.
-VIEWER: str = "https://rerun.io/viewer?url="
-
-#: The URL prefix of the files in the Hub repo.
-HUB_FILES: str = f"https://huggingface.co/datasets/{DATASET_REPO_ID}/resolve/main/"
-
-
-def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
+def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     """Write ``site/data/`` from the robot layer of ``dataset/``.
 
     Args:
         sources: The keys of ``sources.SOURCES`` to include. The default is every source.
             For a site that others can open, include only ``lafan1`` and the ``kimodo``
             sources. The licenses of the other sources do not let you share their motions.
-        out: The directory to write. ``scripts/publish.py`` writes its upload to a different
+        out: The directory to write. ``uv run publish`` writes its upload to a different
             directory, so the local site keeps every source.
     """
     urdf = lite_urdf_path()
@@ -111,7 +97,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
         raise SystemExit(f"Unknown sources {unknown}. Choose from {sorted(SOURCES)}.")
     paths = sorted(path for path in layer.glob("*.rrd") if source_of(path) in sources)
     if not paths:
-        raise SystemExit(f"No motions of {sources} under {layer}. Run scripts/retarget.py.")
+        raise SystemExit(f"No motions of {sources} under {layer}. Run `uv run retarget`.")
     # The page lists a source only if it has a motion to show.
     present = {source_of(path) for path in paths}
     sources = [source for source in sources if source in present]
@@ -176,9 +162,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
                 "license": SOURCES[key].license,
                 "skeleton": SOURCES[key].skeleton,
                 "url": SOURCES[key].page or f"https://huggingface.co/datasets/{SOURCES[key].repo_id}",
-                # The Hub repo holds only the public source, so only its motions have a URL
-                # that the web viewer can open.
-                "hub": f"{HUB_FILES}{robot}/" if key == PUBLIC_SOURCE else None,
+                "hub": layer_url(key, robot),
             }
             for key in sources
         },
@@ -193,12 +177,7 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     data_mb = sum(path.stat().st_size for path in out.rglob("*") if path.is_file()) / 1e6
     print(f"{len(motions)} motions of {', '.join(sources)} -> {out}")
     print(f"  {data_mb:.1f} MB in {len(packs.names)} packs, and {mesh_mb:.1f} MB robot meshes")
-    print("  serve: uv run scripts/serve.py")
-
-
-def source_of(path: Path) -> str:
-    """Return the source key of a motion file, which is named ``<source>_<clip>``."""
-    return path.stem.split("_", 1)[0]
+    print("  serve: uv run serve")
 
 
 class Packs:
@@ -447,7 +426,3 @@ def _read_stl(path: Path) -> tuple[np.ndarray, np.ndarray]:
         facets["corners"].reshape(-1, 3), axis=0, return_inverse=True
     )
     return vertices.astype(np.float64), triangles.reshape(-1, 3)
-
-
-if __name__ == "__main__":
-    tyro.cli(main)

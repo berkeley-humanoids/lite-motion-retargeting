@@ -5,25 +5,27 @@ dataset is a source. A source holds either the original human motion, or motion 
 authors already retargeted to the 29-DoF Unitree G1. Each clip of a source becomes one
 layered [Rerun](https://rerun.io) motion.
 
-The LAFAN1 motions are on the Hub in [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset].
-You can [open one in a browser][viewer], or browse all of them in the
-[Lite Motion Dataset][space] Space.
+The Kimodo motions are on the Hub in [`Berkeley-Humanoids/Lite-Kimodo-Dataset`][kimodo-hub],
+and the LAFAN1 motions in the private repo [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset].
+Browse them in the [Lite Motions][space] Space. The LAFAN1 motions show there after you
+sign in with a Hugging Face account that can read the private repo.
 
 ## Sources
 
 | Source | Clips | Rate | Size | License | On the Hub |
 |---|---|---|---|---|---|
-| `lafan1bvh`: [LAFAN1 BVH][lafan1bvh], human | 77 | 30 Hz | 0.35 GB | CC BY-NC-ND 4.0 | No |
-| `lafan1`: [LAFAN1][lafan1] | 40 | 30 Hz | 0.3 GB | CC BY-NC-ND 4.0 | Yes |
+| `lafan1bvh`: [LAFAN1 BVH][lafan1bvh], human | 77 | 30 Hz | 0.35 GB | CC BY-NC-ND 4.0 | Private |
+| `lafan1`: [LAFAN1][lafan1] | 40 | 30 Hz | 0.3 GB | CC BY-NC-ND 4.0 | No |
 | `amass`: [AMASS][amass], all subsets | 17,717 | 60 to 250 Hz | 7 GB | AMASS: non-commercial research, no redistribution | No |
 | `motiondecode`: [ChingMu MotionDecode][motiondecode] | 92,559 | 120 Hz | 148 GB | ChingMu: non-commercial research, not to be hosted as a competing dataset | No |
-| `kimodo`: [Kimodo G1][kimodo] | 10,000 | 50 Hz | 1.2 GB | Apache-2.0 | No |
-| `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | No |
-| `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | No |
+| `kimodo`: [Kimodo G1][kimodo] | 10,000 | 50 Hz | 1.2 GB | Apache-2.0 | Yes |
+| `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | Yes |
+| `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | Yes |
 
-`scripts/sources.py` defines each source and its loader. The `amass` and `motiondecode`
-motions stay in your local store, `dataset/`, for training. `publish.py` uploads only
-`lafan1`.
+`src/lite_motion_retargeting/sources/` defines each source and its loader. The `amass`
+and `motiondecode` motions stay in your local store, `dataset/`, for training. `uv run
+publish` uploads `lafan1bvh` to a private repo, and the three Kimodo sets to a public one.
+See [Publish to the Hub](#publish-to-the-hub).
 
 `lafan1bvh` is the human motion that the authors of `lafan1` retargeted: the BVH takes of
 Ubisoft's LAFAN1. These takes come as a zip on GitHub, not on the Hub. `lafan1` holds 40
@@ -35,7 +37,7 @@ files on request, and Kimodo generated its clips on the G1 directly.
 `kimodo` is not motion capture. NVIDIA's Kimodo model generated each clip from a text
 prompt, such as "a person throwing boxing punches". Then a tracking policy played the clip
 on a simulated G1. Each clip is 4 s long, and its category is its prompt. `kimodo` ships
-as LeRobot shards, and `download.py` splits them into one file per clip.
+as LeRobot shards, and `uv run download` splits them into one file per clip.
 
 `kimodolh2` and `kimodolh3` come from the same model and policy, but each prompt chains
 several actions, as in "combat drill: kick → walk → sidestep". A v2 clip chains 3 to 8
@@ -47,32 +49,89 @@ subsets, such as CMU, are less restrictive than AMASS as a whole.
 
 ## Use
 
+`uv sync` installs the package, `src/lite_motion_retargeting/`, with a command for each
+step of the pipeline:
+
+| Command | Reads | Writes |
+|---|---|---|
+| `uv run download` | a source, on the Hub or the web | `.cache/<source>/` |
+| `uv run retarget` | `.cache/<source>/` | the store, `dataset/` |
+| `uv run reactor train`, `uv run reactor export` | the store | `logs/reactor/`, then another store |
+| `uv run build-site` | the store | the browser data, `site/data/` |
+| `uv run serve` | `site/` | |
+| `uv run publish` | the store, `site/` | the Hub dataset repos, and the Space |
+
+`uv run <command> --help` lists the options of a command. The package runs from its
+clone: it keeps `.cache/`, `dataset/` and `logs/` beside the code.
+
 ```bash
 uv sync
-uv run scripts/download.py               # G1 model and LAFAN1 -> .cache/
-uv run scripts/retarget.py --workers -1  # every clip, every core
+uv run download               # G1 model and LAFAN1 -> .cache/
+uv run retarget --workers -1  # every clip, every core
 uv run rerun dataset/*/lafan1_walk1_subject1.rrd dataset/blueprints/lite_pro.rbl
-uv run scripts/publish.py --clear        # upload LAFAN1 and the browser to the Hub
+uv run publish --clear        # upload the Hub datasets and the browser to the Hub
 ```
 
-To retarget another source, pass `--source` to both scripts. To download part of a large
+To retarget another source, pass `--source` to both steps. To download part of a large
 source, pass Hub glob patterns to `--include`:
 
 ```bash
-uv run scripts/download.py --source amass --include 'g1/CMU/**'
-uv run scripts/retarget.py --source amass --clip '^CMU/' --workers -1
+uv run download --source amass --include 'g1/CMU/**'
+uv run retarget --source amass --clip '^CMU/' --workers -1
 uv run rerun dataset/*/amass_CMU_07_07_01_poses_120_jpos.rrd \
     --asset dataset/assets/lite_pro.rrd dataset/blueprints/lite_pro.rbl
 
-uv run scripts/download.py --source motiondecode \
+uv run download --source motiondecode \
     --include 'samples/1.3.Basic_Gait_Category/**' 'samples/5.Dance/**'
-uv run scripts/retarget.py --source motiondecode --workers -1
+uv run retarget --source motiondecode --workers -1
 
-uv run scripts/download.py --source lafan1bvh
-uv run scripts/retarget.py --source lafan1bvh --clip '^walk1_subject1$' --validate-only
+uv run download --source lafan1bvh
+uv run retarget --source lafan1bvh --clip '^walk1_subject1$' --validate-only
 ```
 
-To write to the Hub, run `hf auth login` or set `HF_TOKEN`.
+### Publish to the Hub
+
+`uv run publish` uploads Hub datasets from the store. A Hub dataset is one Hub dataset
+repo with its own card, and it holds the motions of one or more sources. `HUB_DATASETS` in
+`src/lite_motion_retargeting/hub.py` lists them:
+
+| Hub dataset | Repo | Sources | Card | Private |
+|---|---|---|---|---|
+| `lafan1` | [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset] | `lafan1bvh` | `cards/lafan1.md` | Yes |
+| `kimodo` | [`Berkeley-Humanoids/Lite-Kimodo-Dataset`][kimodo-hub] | `kimodo`, `kimodolh2`, `kimodolh3` | `cards/kimodo.md` | No |
+
+Each repo holds the layers of its motions as `<layer>/<source>/<motion>.rrd`, because the
+Hub takes at most 10,000 files in one directory. `web/` holds the same motions in the form
+that the motion browser plays. `uv run publish` writes the repo into `dataset/hub/<name>/`
+as hard links to the store, with the card and `web/`. Then it uploads that directory, in
+several commits if it is large. Last, it uploads the page to the [Space][space], with a
+collection for the `web/` of each Hub dataset. Thus the Space plays the motions of every
+Hub dataset on one page.
+
+```bash
+uv run publish --dry-run          # write dataset/hub/<name>/, and upload nothing
+uv run publish                    # every Hub dataset, then the page
+uv run publish --datasets lafan1  # one Hub dataset, then the page
+uv run publish --datasets         # only the page
+```
+
+`--clear` deletes each file in a repo that the upload does not replace. To write to the
+Hub, run `hf auth login` or set `HF_TOKEN`.
+
+To add a Hub dataset, add an entry to `HUB_DATASETS` and a card to `cards/`. A source goes
+to one Hub dataset at most. Then retarget its sources again: `uv run retarget` writes the
+robot geometry into each motion of a Hub dataset with `geometry=True`, so that the motion
+opens alone in the Rerun web viewer, and the card can link each motion there. The geometry
+takes 9 MB, more than a short motion. Thus a large Hub dataset, such as Kimodo, sets
+`geometry=False`: its motions share `assets/lite_pro.rrd`. A Hub dataset with
+`private=True` goes to a private repo, and `uv run publish` makes an existing repo private
+too. In the Space, its motions show only to a visitor who signs in with an account that can
+read the repo. The Rerun web viewer cannot read a private repo, so neither the card nor the
+page links its motions there.
+
+**Warning:** Check the license of a source before you add it to a Hub dataset. A private
+repo still shares the motions with each account that can read it. The licenses of AMASS
+and MotionDecode do not allow you to share their motions.
 
 ### Browse the motions
 
@@ -83,20 +142,20 @@ that opens the motion in Rerun. To open a motion directly, add `#<motion>` to th
 the address.
 
 ```bash
-uv run scripts/build_site.py                      # dataset/ -> site/data/
-uv run scripts/serve.py                           # then open http://localhost:8000
+uv run build-site                      # dataset/ -> site/data/
+uv run serve                           # then open http://localhost:8000
 ```
 
-`build_site.py` reads the robot layer of each motion, which is the layer that training
+`uv run build-site` reads the robot layer of each motion, which is the layer that training
 reads. It writes the layer for the page as float32 rows, with the motions end to end in a
 few packs per source. The page loads the robot meshes once. It reads a motion only when
 the card of that motion comes into view, as a byte range of its pack. Serve the page with
-`serve.py`, or with another server that answers range requests, such as Caddy.
+`uv run serve`, or with another server that answers range requests, such as Caddy.
 `python -m http.server` answers a range request with the whole file.
 
 `--sources lafan1` builds a page with LAFAN1 only. For a page that other people can reach,
-build with `--sources lafan1 kimodo kimodolh2 kimodolh3`. The licenses of AMASS and
-MotionDecode do not allow you to share their motions.
+build with `--sources kimodo kimodolh2 kimodolh3`. The licenses of LAFAN1, AMASS and
+MotionDecode do not allow you to share their motions with the public.
 
 The page plays a motion in two views. **Animation** plays it on a character, and the page
 shows this view first. **URDF** plays it on the robot of the URDF. The character is the
@@ -113,36 +172,39 @@ line up and both stand with their soles on the floor.
 
 `site/collections.json` lists the collections that the page reads: folders of motion data,
 `data/` by default. A collection can also be on the Hub, because the Hub answers range
-requests from any site. The [Space][space] works this way: `publish.py` writes the LAFAN1
-motions for the page into `web/` of the dataset repo. Then it uploads `site/` to the
-static Space, with a `collections.json` that points at `web/` as of that commit. A
-collection marked `"private": true` loads only for a visitor who signs in with Hugging
-Face. The page reads it with the token of that account, so a private repo shows only to
-the people who can read it.
+requests from any site. The [Space][space] works this way: its `collections.json` points
+at `web/` of each Hub dataset, as of the last commit to that repo. A collection marked
+`"private": true` loads only for a visitor who signs in with Hugging Face. The page reads
+it with the token of that account, so a private repo shows only to the people who can read
+it. The page merges the collections into one list, and draws the robot of the first.
 
-| Script | What it does |
+### The package
+
+The package, `src/lite_motion_retargeting/`, follows the layout of
+[mjlab](https://github.com/mujocolab/mjlab). `scripts/` holds the steps, and the other
+modules are the library that the steps share:
+
+| Module | What it does |
 |---|---|
-| `download.py` | Downloads the G1 model into `.cache/g1/`, and a source into `.cache/<source>/`. |
-| `retarget.py` | Retargets each clip, measures it, and writes its two layers under `dataset/`. |
-| `sources.py` | Defines the sources, the loader that reads the clips of each source, and the rule that names a motion. |
-| `human.py` | Defines the human skeleton that every human source maps onto, and reads LAFAN1 BVH files. |
-| `mapping.py` | Builds the goal of each Lite link from a human pose, plants the feet, and solves the IK that reaches the goals. |
-| `reactor.py` | Retargets the motions of a store again, in physics, with the RL method of ReActor. See [ReActor](#reactor). |
+| `scripts/` | A module per command: `download.py`, `retarget.py`, `reactor.py`, `build_site.py`, `serve.py` and `publish.py`. `pyproject.toml` lists the commands. |
+| `sources/` | Defines the sources and the rule that names a motion. `g1.py` reads the G1 sources. `human.py` defines the human skeleton that every human source maps onto, and reads LAFAN1 BVH files. |
+| `retargeting/` | Retargets one clip, grounds it, and measures it. `g1.py` is the G1 path. `human.py` builds the goal of each Lite link from a human pose, plants the feet, and solves the IK that reaches the goals. |
+| `reactor/` | The mjlab environment of ReActor: its terms in `mdp.py`, its configs in `env_cfg.py`, and the motions that it reads in `library.py`. See [ReActor](#reactor). |
+| `robots.py` | Loads the Lite and G1 models, and names their joints and bodies. |
+| `kinematics.py` | Resampling, forward kinematics, the soles, and foot contacts. |
 | `store.py` | Defines the file format. |
-| `publish.py` | Fills the motion index of `DATASET_CARD.md`, and uploads the card, the store and the page data to the dataset repo. Then uploads the page to the Space. |
-| `build_site.py` | Writes the motions and the robot meshes for the page into `site/data/`. |
-| `serve.py` | Serves `site/` on this machine, and answers range requests. |
-| `common.py` | Holds the G1 joint table, the model loaders, resampling, forward kinematics, the soles, and foot contacts. |
+| `browser.py` | Writes the motions and the robot meshes for the page. |
+| `hub.py` | Lists the Hub datasets, and names the Space. |
 
-`retarget.py` takes `--source <name>`, `--clip <regex>`, `--no-ik`, `--ik-iters N`,
+`uv run retarget` takes `--source <name>`, `--clip <regex>`, `--no-ik`, `--ik-iters N`,
 `--workers N`, `--out <dir>` and `--validate-only`. `--out` writes the store to another
 directory. `--validate-only` prints the metrics of the first clip and writes nothing. The
 regex of `--clip` matches the path of a clip below the clip directory of its source,
 without the suffix, such as `CMU/07/07_01_poses_120_jpos`. The motion name comes from the
 same path: `amass_CMU_07_07_01_poses_120_jpos`.
 
-`publish.py` takes `--dry-run`, `--repo-id <id>`, `--space-id <id>` and `--clear`.
-`--clear` deletes every file in the dataset repo that this store does not replace.
+`uv run publish` takes `--datasets <name>...`, `--clear` and `--dry-run`, as
+[Publish to the Hub](#publish-to-the-hub) shows.
 
 ### Cost
 
@@ -162,17 +224,17 @@ are:
 | `kimodolh3` | 9,941 | 118 | 104 GB | 3.5 GB |
 | All | 139,693 | 1,234 | 1.37 TB | 37.6 GB |
 
-One MotionDecode clip is empty upstream. On 128 cores, `retarget.py` took 3 h 40 min for
-64,224 MotionDecode clips. `build_site.py` takes about 45 min for all sources.
+One MotionDecode clip is empty upstream. On 128 cores, `uv run retarget` took 3 h 40 min
+for 64,224 MotionDecode clips. `uv run build-site` takes about 45 min for all sources.
 
 The store holds the 9 MB robot geometry once, in `dataset/assets/lite_pro.rrd`.
 `rerun --asset` attaches the geometry to the motion that you open. Only the native viewer
-loads assets. The dataset card on the Hub opens a `lafan1` motion in the web viewer, so
-each `lafan1` motion carries its own copy of the geometry.
+loads assets. The card of a Hub dataset with `geometry=True` opens a motion in the web
+viewer, so each of its motions carries its own copy of the geometry.
 
 ## How a clip is retargeted
 
-A source runs at 30 to 250 Hz. `retarget.py` writes every motion at 50 Hz, the control
+A source runs at 30 to 250 Hz. `uv run retarget` writes every motion at 50 Hz, the control
 rate of the training environment. It resamples the source first, so the IK solves every
 frame that reaches the file. As a result, the body poses stay the exact kinematics of the
 joints beside them. The loader of the source decides which of two paths a clip takes: the
@@ -180,22 +242,22 @@ human path or the G1 path.
 
 ### A human clip
 
-1. **One skeleton.** `human.py` reads the clip into the world poses of one human skeleton.
-   The skeleton follows the keypoints of the Lite conventions: pelvis, hips, knees, feet,
-   toes, waist, chest, neck, head, shoulders, elbows and hands. Each rotation is
-   rest-normalized: it is identity when the body stands in a T-pose that faces +x. Thus, a
-   new format needs only a reader.
-2. **Goals.** `mapping.goals` builds a goal skeleton with the proportions of Lite and the
-   joint rotations of the human. Its pelvis follows the human pelvis, scaled by the ratio
-   of the two pelvis heights. Every other joint hangs from the joint above it by the Lite
-   segment between them, and that segment turns as the human segment turns. Each Lite link
-   in `mapping.LITE_PAIRS` gets a goal pose: the pelvis, thighs, shins, feet, chest, head,
-   upper arms, forearms and hands.
+1. **One skeleton.** `sources/human.py` reads the clip into the world poses of one human
+   skeleton. The skeleton follows the keypoints of the Lite conventions: pelvis, hips,
+   knees, feet, toes, waist, chest, neck, head, shoulders, elbows and hands. Each rotation
+   is rest-normalized: it is identity when the body stands in a T-pose that faces +x.
+   Thus, a new format needs only a reader.
+2. **Goals.** `retargeting.human.goals` builds a goal skeleton with the proportions of
+   Lite and the joint rotations of the human. Its pelvis follows the human pelvis, scaled
+   by the ratio of the two pelvis heights. Every other joint hangs from the joint above it
+   by the Lite segment between them, and that segment turns as the human segment turns.
+   Each Lite link in `retargeting.human.LITE_PAIRS` gets a goal pose: the pelvis, thighs,
+   shins, feet, chest, head, upper arms, forearms and hands.
 3. **Foot planting.** A skeleton with other proportions does not step where the human
-   steps. `common.planted` finds the frames where a human foot stands on the floor, from
-   the speed and height of its ankle and toe. Then `mapping.plant` shifts the goal
-   skeleton, frame by frame, so that a planted foot keeps its sole point in place and on
-   the floor. It also lifts a foot whose sole would dip through the floor.
+   steps. `kinematics.planted` finds the frames where a human foot stands on the floor,
+   from the speed and height of its ankle and toe. Then `retargeting.human.plant` shifts
+   the goal skeleton, frame by frame, so that a planted foot keeps its sole point in place
+   and on the floor. It also lifts a foot whose sole would dip through the floor.
 4. **IK.** Per-frame [`mink`](https://github.com/kevinzakka/mink) IK with a free base
    moves Lite onto the goals, in position and orientation. Each frame starts from the
    solution of the frame before. The thigh, shin, upper arm and forearm goals pin the
@@ -211,7 +273,7 @@ policy that tracks the goals in simulation, can use them in place of the IK.
 ### A G1 clip
 
 1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
-   `common.G1_TO_LITE`.
+   `retargeting.g1.G1_TO_LITE`.
 2. **IK refinement.** Per-frame IK moves the result toward the pelvis-local poses of both
    feet and both hands of the G1, in position and orientation. A per-DoF posture cost
    holds the solution near the result of step 1. Thus, this step adjusts the pose but does
@@ -221,22 +283,23 @@ policy that tracks the goals in simulation, can use them in place of the IK.
 
 **Grounding.** A constant shift of the pelvis height per clip puts the lowest point of the
 Lite soles on the floor in the median frame. Each source puts the G1 at its own height,
-and AMASS puts the pelvis at the floor. Thus, `retarget.py` measures the shift on the Lite
-result. The median ignores the few frames where a heel or a toe dips through the floor.
+and AMASS puts the pelvis at the floor. Thus, `retargeting/` measures the shift on the
+Lite result. The median ignores the few frames where a heel or a toe dips through the
+floor.
 
 **Driven joints.** A source drives only the Lite joints that it has data for, and every
-other joint holds its default, 0. A G1 source drives the 29 joints of `common.G1_TO_LITE`,
-and has no neck, ankle yaw or fingers. A human source drives every joint between the
-pelvis and a link with a goal: 34 joints for LAFAN1, which has no fingers. The robot layer
-keeps the driven joints as `active_joint_names`. Thus, a motion with fewer driven joints
-can still train the robot that it covers, such as a G1 motion for the legs of the Lite
-Biped.
+other joint holds its default, 0. A G1 source drives the 29 joints of
+`retargeting.g1.G1_TO_LITE`, and has no neck, ankle yaw or fingers. A human source drives
+every joint between the pelvis and a link with a goal: 34 joints for LAFAN1, which has no
+fingers. The robot layer keeps the driven joints as `active_joint_names`. Thus, a motion
+with fewer driven joints can still train the robot that it covers, such as a G1 motion for
+the legs of the Lite Biped.
 
 The page in `site/` shows the driven joints of each motion, and how many joints of each
 Lite variant the motion drives. The page also filters the motions by the joint groups that
 they drive.
 
-**Metrics.** `retarget.motion_metrics` measures every motion. The robot layer keeps the
+**Metrics.** `retargeting.motion_metrics` measures every motion. The robot layer keeps the
 numbers as its `metrics` property, and a run prints their mean:
 
 | Metric | What it measures |
@@ -265,8 +328,8 @@ the URDF of the same package. Thus, a new version of `lite-description` gives ne
 
 ## ReActor
 
-`reactor.py` retargets the motions of a store again, in physics, with the method of
-Disney's [ReActor](https://arxiv.org/abs/2605.06593). The IK of `retarget.py` ignores
+`uv run reactor` retargets the motions of a store again, in physics, with the method of
+Disney's [ReActor](https://arxiv.org/abs/2605.06593). The IK of `retargeting/` ignores
 mass, contact and torque. Thus, its motions can float, sink, slide, or ask a motor for
 more than the motor has. ReActor tracks the same goals with a policy in MuJoCo Warp,
 through mjlab, and the simulated motion is the retargeted motion:
@@ -280,7 +343,7 @@ through mjlab, and the simulated motion is the retargeted motion:
    paper.
 3. **Export.** The policy plays each motion from its first frame to its end. The simulated
    joints become a robot layer of a new store, with the learned goals, the metrics of
-   `retarget.py`, and the peak and mean wrench. If the policy loses track of the goals,
+   `retargeting/`, and the peak and mean wrench. If the policy loses track of the goals,
    `export` cuts the motion into pieces, as described below.
 
 The simulation is ideal: a PD position actuator per joint with the armature and effort
@@ -289,13 +352,13 @@ randomization. ReActor makes reference motions. The policy that runs on the robo
 on these motions in
 [Lite-Motion-Tracking](https://github.com/Berkeley-Humanoids/Lite-Motion-Tracking).
 
-ReActor reads the robot layers of a store, so it runs on any source that `retarget.py`
+ReActor reads the robot layers of a store, so it runs on any source that `uv run retarget`
 wrote, human or G1. ReActor welds every joint that no motion drives, such as the fingers.
 The `reactor` extra adds mjlab, which pins MuJoCo to 3.11 for the whole project.
 
 ```bash
-uv run --extra reactor scripts/reactor.py train --source lafan1bvh --clip '^walk' --iterations 3000
-uv run --extra reactor scripts/reactor.py export --run logs/reactor/<run> --out dataset_reactor
+uv run --extra reactor reactor train --source lafan1bvh --clip '^walk' --iterations 3000
+uv run --extra reactor reactor export --run logs/reactor/<run> --out dataset_reactor
 ```
 
 `train` writes its run to `logs/reactor/`, with the motions that it read (`library.npz`),
@@ -352,7 +415,7 @@ code.
 | Paper | Here | Why |
 |---|---|---|
 | PD targets, and a reset at the nominal pose with a ramp-in | PD targets around the IK solution, and a reset at the IK state | The IK solution exists, so the policy starts from it |
-| Offsets on the source body frames | Offsets on the goals of `mapping.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
+| Offsets on the source body frames | Offsets on the goals of `retargeting/human.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
 | Offset bounds of 0.5 | 0.1 m, 0.3 rad, 0.05 m | Lite is about 1 m tall |
 | Projected SGD on the offsets | Adam, then the projection | The paper gives no step size |
 
@@ -361,7 +424,7 @@ code.
 `store.py` writes the store, `dataset/`, as one directory per layer: `base/` for the
 source clip as published at its own rate, `lite_pro/` for the 50 Hz retargeted motion,
 `assets/` for the robot geometry, and `blueprints/` for the viewer layout.
-`DATASET_CARD.md` documents the store, and `store.py` documents every entity path.
+`cards/lafan1.md` documents the store, and `store.py` documents every entity path.
 
 Training and deployment read the robot layer. The robot layer is self-contained: its
 joints reset the robot, and its body poses are the goal. The goal uses the frame
@@ -381,7 +444,8 @@ reads the older single-layer `tracking/*.rrd`. It needs a reader for this store 
 can train on these motions.
 
 [dataset]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-LAFAN1-Dataset
-[space]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motion-Dataset
+[space]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motions
+[kimodo-hub]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-Kimodo-Dataset
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
 [lafan1bvh]: https://github.com/ubisoft/ubisoft-laforge-animation-dataset
 [amass]: https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics
@@ -389,4 +453,3 @@ can train on these motions.
 [kimodo]: https://huggingface.co/datasets/cagataydev/kimodo-g1-motion-v1
 [kimodolh2]: https://huggingface.co/datasets/cagataydev/kimodo-g1-longhorizon-v2
 [kimodolh3]: https://huggingface.co/datasets/cagataydev/kimodo-g1-longhorizon-v3
-[viewer]: https://rerun.io/viewer?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2FBerkeley-Humanoids%2FLite-LAFAN1-Dataset%2Fresolve%2Fmain%2Flite_pro%2Flafan1_dance1_subject1.rrd

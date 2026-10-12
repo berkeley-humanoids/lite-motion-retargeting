@@ -22,3 +22,19 @@ dependencies = [
 [project.optional-dependencies]
 # ReActor trains in MuJoCo Warp. mjlab pins MuJoCo, which the IK then runs on too.
 reactor = ["mjlab>=1.6"]
+
+[project.scripts]
+download = "lite_motion_retargeting.scripts.download:main"
+retarget = "lite_motion_retargeting.scripts.retarget:main"
+reactor = "lite_motion_retargeting.scripts.reactor:main"
+build-site = "lite_motion_retargeting.scripts.build_site:main"
+serve = "lite_motion_retargeting.scripts.serve:main"
+publish = "lite_motion_retargeting.scripts.publish:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# lite-description installs from GitHub, not from PyPI.
+allow-direct-references = true

@@ -2,7 +2,7 @@
 // of the URDF, and a VRM character. The cards and the viewer each pose the figure on show and
 // draw it in turn, so the page loads each model only once.
 //
-// scripts/build_site.py writes a collection of motions: a folder with index.json.gz, the
+// uv run build-site writes a collection of motions: a folder with index.json.gz, the
 // robot and the packs. collections.json lists the collections that the page shows: data/
 // beside the page, or folders on the Hugging Face Hub. A motion is a byte range of a pack,
 // with float32 rows of [pelvis xyz, pelvis quaternion xyzw, then the angle of each joint
@@ -67,7 +67,7 @@ async function fetchRange(url, offset, bytes, headers) {
   }
   if (response?.status !== 206) response = await fetchOk(url, { ...headers, Range: range });
   if (response.status !== 206) {
-    throw new Error(`${url} answered with the whole file, not a range. Serve the site with scripts/serve.py.`);
+    throw new Error(`${url} answered with the whole file, not a range. Serve the site with uv run serve.`);
   }
   packAddresses.set(url, response.url);
   return new Float32Array(await response.arrayBuffer());
@@ -1185,8 +1185,8 @@ async function main() {
     elements.count.textContent = "No motions loaded";
     showNotice(
       "The motion data did not load",
-      "Build the data with <code>uv run scripts/build_site.py</code>. Then serve this directory with " +
-      "<code>uv run scripts/serve.py</code>. A page that you open from the file system cannot read the data.",
+      "Build the data with <code>uv run build-site</code>. Then serve this directory with " +
+      "<code>uv run serve</code>. A page that you open from the file system cannot read the data.",
     );
     return;
   }

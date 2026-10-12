@@ -1,31 +1,29 @@
 """Download a motion source, and the G1 model that the G1 sources use.
 
-The script puts the G1 URDF and its meshes in ``.cache/g1/``, because every G1 source
+The step puts the G1 URDF and its meshes in ``.cache/g1/``, because every G1 source
 shares them. It puts the clips in ``.cache/<source>/``, from the Hub, or from the zip of a
 source that is not on the Hub. To download only part of a large set from the Hub, give Hub
 glob patterns with ``--include``. They replace the default patterns of the source.
 
 Usage:
-    uv run scripts/download.py
-    uv run scripts/download.py --source lafan1bvh
-    uv run scripts/download.py --source amass --include 'g1/CMU/**' 'g1/KIT/**'
-    uv run scripts/download.py --source motiondecode --include 'samples/1.3.Basic_Gait_Category/**'
-    uv run scripts/download.py --source kimodo
-    uv run scripts/download.py --force
+    uv run download
+    uv run download --source lafan1bvh
+    uv run download --source amass --include 'g1/CMU/**' 'g1/KIT/**'
+    uv run download --source motiondecode --include 'samples/1.3.Basic_Gait_Category/**'
+    uv run download --source kimodo
+    uv run download --force
 """
 
-import sys
 import urllib.request
 import zipfile
-from pathlib import Path
 
 import tyro
 from huggingface_hub import snapshot_download
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import CACHE_ROOT, G1_REPO_ID, G1_URDF_PATH  # noqa: E402
-from human import HumanClip  # noqa: E402
-from sources import SOURCES  # noqa: E402
+from .. import CACHE_ROOT
+from ..robots import G1_REPO_ID, G1_URDF_PATH
+from ..sources import SOURCES
+from ..sources.human import HumanClip
 
 #: The number of files that download in parallel. AMASS and MotionDecode have tens of
 #: thousands of small files, so the time per request, not the bandwidth, sets the download
@@ -33,7 +31,7 @@ from sources import SOURCES  # noqa: E402
 DOWNLOAD_WORKERS: int = 32
 
 
-def main(source: str = "lafan1", include: list[str] | None = None, force: bool = False) -> None:
+def download(source: str = "lafan1", include: list[str] | None = None, force: bool = False) -> None:
     """Download ``source`` into ``.cache/<source>/``, and the G1 model into ``.cache/g1/``.
 
     Args:
@@ -87,5 +85,6 @@ def main(source: str = "lafan1", include: list[str] | None = None, force: bool =
     print(f"  sample : {clips[0].relative_to(local_path)}  ({frames} frames @ {fps} Hz)")
 
 
-if __name__ == "__main__":
-    tyro.cli(main)
+def main() -> None:
+    """Run :func:`download` with the options on the command line."""
+    tyro.cli(download)

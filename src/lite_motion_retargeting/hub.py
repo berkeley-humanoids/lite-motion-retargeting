@@ -7,7 +7,8 @@ plays. A source goes to one Hub dataset at most.
 
 The terms of a source decide whether a Hub dataset can hold it. AMASS bars any
 redistribution, and ChingMu bars hosting MotionDecode as a competing dataset. Thus their
-motions stay in the local store, for training.
+motions stay in the local store, for training. LAFAN1 is CC BY-NC-ND, which bars sharing a
+retarget with the public, so its Hub dataset is private.
 
 The Space plays the ``web/`` of every Hub dataset on one page. A private Hub dataset shows
 there only to a visitor who signs in with an account that can read it.
@@ -54,6 +55,7 @@ HUB_DATASETS: dict[str, HubDataset] = {
         repo_id="Berkeley-Humanoids/Lite-LAFAN1-Dataset",
         sources=("lafan1bvh",),
         card=CARD_ROOT / "lafan1.md",
+        private=True,
     ),
     "kimodo": HubDataset(
         repo_id="Berkeley-Humanoids/Lite-Kimodo-Dataset",

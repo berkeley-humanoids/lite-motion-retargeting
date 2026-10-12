@@ -133,6 +133,8 @@ def publish_dataset(api: HfApi, name: str, clear: bool, dry_run: bool) -> None:
         return
 
     api.create_repo(dataset.repo_id, repo_type="dataset", private=dataset.private, exist_ok=True)
+    # `create_repo` keeps the visibility of a repo that exists, so set it before the upload.
+    api.update_repo_settings(dataset.repo_id, repo_type="dataset", private=dataset.private)
     api.upload_folder(
         repo_id=dataset.repo_id,
         repo_type="dataset",

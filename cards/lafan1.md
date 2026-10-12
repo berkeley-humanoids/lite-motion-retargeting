@@ -21,11 +21,11 @@ viewer: false
 This dataset holds the 77 takes of Ubisoft's [LAFAN1][lafan1] motion capture, retargeted to
 the Berkeley Lite Pro humanoid at 50 Hz. [Lite-Motion-Retargeting][retarget] retargeted
 them from the human motion itself, and kept the 30 Hz take beside each motion. Each motion
-is one [Rerun](https://rerun.io) recording. You can [open one in your browser][viewer], with
-no install. The [table below](#motions) links every motion, and the [Lite Motions][browser]
-Space plays all of them on one page.
+is one [Rerun](https://rerun.io) recording. The [Lite Motions][browser] Space plays all of
+them on one page, after you sign in with a Hugging Face account that can read this repo.
 
 ```bash
+hf auth login  # with an account that can read this repo
 hf download Berkeley-Humanoids/Lite-LAFAN1-Dataset --repo-type dataset \
     --include "*/lafan1bvh/lafan1bvh_dance1_subject1.rrd" "blueprints/*" --local-dir .
 
@@ -73,10 +73,6 @@ Every column carries a `frame` index and a `time` in seconds. The two layers run
 different rates, so `time` lines them up. `src/lite_motion_retargeting/store.py` of
 [Lite-Motion-Retargeting][retarget] lists every entity path and property.
 
-## Motions
-
-<!-- motions -->
-
 ## Source
 
 [LAFAN1][lafan1] is the animation dataset of Ubisoft La Forge: 77 takes of 5 subjects, as
@@ -95,8 +91,9 @@ motion replaced them. Over those 40 takes, it lowers the mean foot slide from 9.
 2.6 cm/s, the planted gap from 1.53 to 0.40 cm, and the penetration from 4.1 to 1.1 cm. The
 history of this repo keeps the earlier version.
 
-CC BY-NC-ND 4.0, inherited from LAFAN1. Non-commercial use only. If you use these motions,
-cite the LAFAN1 paper:
+CC BY-NC-ND 4.0, inherited from LAFAN1. Non-commercial use only. The license does not
+allow you to share adapted material, such as these motions, with the public. Thus this
+repo is private. If you use these motions, cite the LAFAN1 paper:
 
 ```bibtex
 @article{harvey2020robust,
@@ -114,4 +111,3 @@ cite the LAFAN1 paper:
 [g1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
 [retarget]: https://github.com/Berkeley-Humanoids/Lite-Motion-Retargeting
 [browser]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motions
-[viewer]: https://rerun.io/viewer?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2FBerkeley-Humanoids%2FLite-LAFAN1-Dataset%2Fresolve%2Fmain%2Flite_pro%2Flafan1bvh%2Flafan1bvh_dance1_subject1.rrd

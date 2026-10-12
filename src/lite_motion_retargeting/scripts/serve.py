@@ -16,7 +16,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import tyro
 
-from .common import SITE_ROOT
+from .. import SITE_ROOT
 
 
 class RangeRequestHandler(SimpleHTTPRequestHandler):
@@ -46,7 +46,7 @@ class RangeRequestHandler(SimpleHTTPRequestHandler):
         return io.BytesIO(body)
 
 
-def main(port: int = 8000) -> None:
+def serve(port: int = 8000) -> None:
     """Serve ``site/`` until you stop the server with Ctrl+C.
 
     Args:
@@ -57,6 +57,6 @@ def main(port: int = 8000) -> None:
     server.serve_forever()
 
 
-def cli() -> None:
-    """Run :func:`main` with the options on the command line."""
-    tyro.cli(main)
+def main() -> None:
+    """Run :func:`serve` with the options on the command line."""
+    tyro.cli(serve)

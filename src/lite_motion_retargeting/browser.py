@@ -1,4 +1,4 @@
-"""Write the motions and the robot that ``site/index.html`` plays into ``site/data/``.
+"""The motions and the robot that the motion browser, ``site/index.html``, plays.
 
 The page is static, so any file server that answers range requests can host it, the
 Hugging Face Hub included. The page shows the robot layer of each motion in ``dataset/``.
@@ -23,11 +23,6 @@ preview, and its card plays the whole motion.
 An entry also names the joints that its source drives, by a position in ``active_sets``.
 The index lists the joints of each joint group in ``groups`` and of each Lite variant in
 ``robots``. Thus the page can show which joints of each robot a motion can train.
-
-Usage:
-    uv run build-site
-    uv run build-site --sources lafan1 kimodo kimodolh2 kimodolh3  # what others may see
-    uv run serve                            # then open http://localhost:8000
 """
 
 import gzip
@@ -43,15 +38,16 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import pyarrow as pa
-import tyro
 from lite_description import get_mjcf_path
 from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from .common import CACHE_ROOT, DATASET_ROOT, G1_DRIVEN, SITE_ROOT, lite_urdf_path
-from .hub import hub_dataset_of
-from .sources import SOURCES, clip_key, motion_name
+from . import CACHE_ROOT, DATASET_ROOT, SITE_ROOT
+from .hub import VIEWER, layer_url
+from .retargeting.g1 import G1_DRIVEN
+from .robots import lite_urdf_path
+from .sources import SOURCES, clip_key, motion_name, source_of
 from .store import BASE_LAYER
 
 SITE_DATA: Path = SITE_ROOT / "data"
@@ -82,11 +78,7 @@ ROBOTS: dict[str, str] = {
     "lite_pro": "Lite Pro",
 }
 
-#: The Rerun web viewer. It opens the recording at the URL that follows this prefix.
-VIEWER: str = "https://rerun.io/viewer?url="
-
-
-def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
+def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     """Write ``site/data/`` from the robot layer of ``dataset/``.
 
     Args:
@@ -186,23 +178,6 @@ def main(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     print(f"{len(motions)} motions of {', '.join(sources)} -> {out}")
     print(f"  {data_mb:.1f} MB in {len(packs.names)} packs, and {mesh_mb:.1f} MB robot meshes")
     print("  serve: uv run serve")
-
-
-def source_of(path: Path) -> str:
-    """Return the source key of a motion file, which is named ``<source>_<clip>``."""
-    return path.stem.split("_", 1)[0]
-
-
-def layer_url(source: str, robot: str) -> str | None:
-    """Return the URL of the robot layer of ``source`` on the Hub, or None if it has none.
-
-    The Rerun web viewer opens a motion at this URL. The viewer cannot read a private repo,
-    so a source of a private Hub dataset has no URL.
-    """
-    dataset = hub_dataset_of(source)
-    if dataset is None or dataset.private:
-        return None
-    return f"https://huggingface.co/datasets/{dataset.repo_id}/resolve/main/{robot}/"
 
 
 class Packs:
@@ -451,8 +426,3 @@ def _read_stl(path: Path) -> tuple[np.ndarray, np.ndarray]:
         facets["corners"].reshape(-1, 3), axis=0, return_inverse=True
     )
     return vertices.astype(np.float64), triangles.reshape(-1, 3)
-
-
-def cli() -> None:
-    """Run :func:`main` with the options on the command line."""
-    tyro.cli(main)

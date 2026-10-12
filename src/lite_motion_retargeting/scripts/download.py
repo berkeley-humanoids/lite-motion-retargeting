@@ -20,9 +20,10 @@ import zipfile
 import tyro
 from huggingface_hub import snapshot_download
 
-from .common import CACHE_ROOT, G1_REPO_ID, G1_URDF_PATH
-from .human import HumanClip
-from .sources import SOURCES
+from .. import CACHE_ROOT
+from ..robots import G1_REPO_ID, G1_URDF_PATH
+from ..sources import SOURCES
+from ..sources.human import HumanClip
 
 #: The number of files that download in parallel. AMASS and MotionDecode have tens of
 #: thousands of small files, so the time per request, not the bandwidth, sets the download
@@ -30,7 +31,7 @@ from .sources import SOURCES
 DOWNLOAD_WORKERS: int = 32
 
 
-def main(source: str = "lafan1", include: list[str] | None = None, force: bool = False) -> None:
+def download(source: str = "lafan1", include: list[str] | None = None, force: bool = False) -> None:
     """Download ``source`` into ``.cache/<source>/``, and the G1 model into ``.cache/g1/``.
 
     Args:
@@ -84,6 +85,6 @@ def main(source: str = "lafan1", include: list[str] | None = None, force: bool =
     print(f"  sample : {clips[0].relative_to(local_path)}  ({frames} frames @ {fps} Hz)")
 
 
-def cli() -> None:
-    """Run :func:`main` with the options on the command line."""
-    tyro.cli(main)
+def main() -> None:
+    """Run :func:`download` with the options on the command line."""
+    tyro.cli(download)

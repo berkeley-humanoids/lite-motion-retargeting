@@ -65,7 +65,11 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 
-from .common import quat_mul
+from .kinematics import quat_mul
+
+#: The rate of every written motion, which is the control rate of the training
+#: environment. A motion at another rate would force the loader to interpolate.
+FPS: int = 50
 
 #: Every motion uses this id, so a directory of motions registers as one dataset.
 APPLICATION_ID: str = "lite-motion-tracking"
@@ -152,7 +156,7 @@ def write_robot_layer(
     Its goal is the base trajectory of the retarget, so the goal and the reached pose are
     the same pose for that one body.
 
-    ``metrics`` are the quality numbers of ``retarget.motion_metrics``. The layer keeps
+    ``metrics`` are the quality numbers of ``retargeting.motion_metrics``. The layer keeps
     them as the ``metrics`` property, so a motion records how well the retarget went.
 
     ``active_joints`` are the joints that the source drives, kept as

@@ -159,9 +159,10 @@ def retarget(
     blueprint = write_blueprint(out, urdf)
     asset = write_asset(out, urdf)
     written = [blueprint, asset]
-    # The Hub card links each published motion into the web viewer, which cannot load the
-    # asset, so a published motion carries its own geometry.
-    geometry = hub_dataset_of(source) is not None
+    # The card of a Hub dataset with geometry links each motion into the web viewer, which
+    # cannot load the asset, so such a motion carries its own geometry.
+    dataset = hub_dataset_of(source)
+    geometry = dataset is not None and dataset.geometry
 
     failed = []
     metrics = []

@@ -5,25 +5,26 @@ dataset is a source. A source holds either the original human motion, or motion 
 authors already retargeted to the 29-DoF Unitree G1. Each clip of a source becomes one
 layered [Rerun](https://rerun.io) motion.
 
-The LAFAN1 motions are on the Hub in [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset].
-You can [open one in a browser][viewer], or browse all of them in the
+The LAFAN1 motions are on the Hub in [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset],
+and the Kimodo motions in [`Berkeley-Humanoids/Lite-Kimodo-Dataset`][kimodo-hub]. You can
+[open a LAFAN1 motion in a browser][viewer], or browse all of them in the
 [Lite Motions][space] Space.
 
 ## Sources
 
 | Source | Clips | Rate | Size | License | On the Hub |
 |---|---|---|---|---|---|
-| `lafan1bvh`: [LAFAN1 BVH][lafan1bvh], human | 77 | 30 Hz | 0.35 GB | CC BY-NC-ND 4.0 | No |
-| `lafan1`: [LAFAN1][lafan1] | 40 | 30 Hz | 0.3 GB | CC BY-NC-ND 4.0 | Yes |
+| `lafan1bvh`: [LAFAN1 BVH][lafan1bvh], human | 77 | 30 Hz | 0.35 GB | CC BY-NC-ND 4.0 | Yes |
+| `lafan1`: [LAFAN1][lafan1] | 40 | 30 Hz | 0.3 GB | CC BY-NC-ND 4.0 | No |
 | `amass`: [AMASS][amass], all subsets | 17,717 | 60 to 250 Hz | 7 GB | AMASS: non-commercial research, no redistribution | No |
 | `motiondecode`: [ChingMu MotionDecode][motiondecode] | 92,559 | 120 Hz | 148 GB | ChingMu: non-commercial research, not to be hosted as a competing dataset | No |
-| `kimodo`: [Kimodo G1][kimodo] | 10,000 | 50 Hz | 1.2 GB | Apache-2.0 | No |
-| `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | No |
-| `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | No |
+| `kimodo`: [Kimodo G1][kimodo] | 10,000 | 50 Hz | 1.2 GB | Apache-2.0 | Yes |
+| `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | Yes |
+| `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | Yes |
 
 `src/lite_motion_retargeting/sources/` defines each source and its loader. The `amass`
-and `motiondecode` motions stay in your local store, `dataset/`, for training. Of the
-other sources, `uv run publish` uploads only `lafan1`. See
+and `motiondecode` motions stay in your local store, `dataset/`, for training. `uv run
+publish` uploads `lafan1bvh` and the three Kimodo sets. See
 [Publish to the Hub](#publish-to-the-hub).
 
 `lafan1bvh` is the human motion that the authors of `lafan1` retargeted: the BVH takes of
@@ -96,13 +97,16 @@ repo with its own card, and it holds the motions of one or more sources. `HUB_DA
 
 | Hub dataset | Repo | Sources | Card |
 |---|---|---|---|
-| `lafan1` | [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset] | `lafan1` | `cards/lafan1.md` |
+| `lafan1` | [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset] | `lafan1bvh` | `cards/lafan1.md` |
+| `kimodo` | [`Berkeley-Humanoids/Lite-Kimodo-Dataset`][kimodo-hub] | `kimodo`, `kimodolh2`, `kimodolh3` | `cards/kimodo.md` |
 
-Each repo holds the layers of its motions, a file per motion, and in `web/` the same
-motions in the form that the motion browser plays. `uv run publish` fills the motion index
-of the card, and uploads the card, the layers and `web/` in one commit. Then it uploads
-the page to the [Space][space], with a collection for the `web/` of each Hub dataset. Thus
-the Space plays the motions of every Hub dataset on one page.
+Each repo holds the layers of its motions as `<layer>/<source>/<motion>.rrd`, because the
+Hub takes at most 10,000 files in one directory. `web/` holds the same motions in the form
+that the motion browser plays. `uv run publish` writes the repo into `dataset/hub/<name>/`
+as hard links to the store, with the card and `web/`. Then it uploads that directory, in
+several commits if it is large. Last, it uploads the page to the [Space][space], with a
+collection for the `web/` of each Hub dataset. Thus the Space plays the motions of every
+Hub dataset on one page.
 
 ```bash
 uv run publish --dry-run          # write dataset/hub/<name>/, and upload nothing
@@ -116,8 +120,11 @@ Hub, run `hf auth login` or set `HF_TOKEN`.
 
 To add a Hub dataset, add an entry to `HUB_DATASETS` and a card to `cards/`. A source goes
 to one Hub dataset at most. Then retarget its sources again: `uv run retarget` writes the
-robot geometry into each motion of a Hub dataset, so that the motion opens alone in the
-Rerun web viewer. A Hub dataset with `private=True` goes to a private repo. In the Space,
+robot geometry into each motion of a Hub dataset with `geometry=True`, so that the motion
+opens alone in the Rerun web viewer, and the card links each motion there. The geometry
+takes 9 MB, more than a short motion. Thus a large Hub dataset, such as Kimodo, sets
+`geometry=False`: its motions share `assets/lite_pro.rrd`. A Hub dataset with
+`private=True` goes to a private repo. In the Space,
 its motions show only to a visitor who signs in with an account that can read the repo.
 
 **Warning:** Check the license of a source before you add it to a Hub dataset. A private
@@ -220,8 +227,8 @@ for 64,224 MotionDecode clips. `uv run build-site` takes about 45 min for all so
 
 The store holds the 9 MB robot geometry once, in `dataset/assets/lite_pro.rrd`.
 `rerun --asset` attaches the geometry to the motion that you open. Only the native viewer
-loads assets. The card of a Hub dataset opens a motion in the web viewer, so each motion
-of a Hub dataset carries its own copy of the geometry.
+loads assets. The card of a Hub dataset with `geometry=True` opens a motion in the web
+viewer, so each of its motions carries its own copy of the geometry.
 
 ## How a clip is retargeted
 
@@ -436,6 +443,7 @@ can train on these motions.
 
 [dataset]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-LAFAN1-Dataset
 [space]: https://huggingface.co/spaces/Berkeley-Humanoids/Lite-Motions
+[kimodo-hub]: https://huggingface.co/datasets/Berkeley-Humanoids/Lite-Kimodo-Dataset
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
 [lafan1bvh]: https://github.com/ubisoft/ubisoft-laforge-animation-dataset
 [amass]: https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics
@@ -443,4 +451,4 @@ can train on these motions.
 [kimodo]: https://huggingface.co/datasets/cagataydev/kimodo-g1-motion-v1
 [kimodolh2]: https://huggingface.co/datasets/cagataydev/kimodo-g1-longhorizon-v2
 [kimodolh3]: https://huggingface.co/datasets/cagataydev/kimodo-g1-longhorizon-v3
-[viewer]: https://rerun.io/viewer?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2FBerkeley-Humanoids%2FLite-LAFAN1-Dataset%2Fresolve%2Fmain%2Flite_pro%2Flafan1_dance1_subject1.rrd
+[viewer]: https://rerun.io/viewer?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2FBerkeley-Humanoids%2FLite-LAFAN1-Dataset%2Fresolve%2Fmain%2Flite_pro%2Flafan1bvh%2Flafan1bvh_dance1_subject1.rrd

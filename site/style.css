@@ -58,7 +58,7 @@ button, input, select { font: inherit; color: inherit; }
 /* ── Masthead ─────────────────────────────────────────────────────────────── */
 
 .masthead {
-  display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
   gap: 16px 32px;
   padding: 28px 24px 20px;
   border-bottom: 1px solid var(--line);
@@ -70,7 +70,6 @@ button, input, select { font: inherit; color: inherit; }
   letter-spacing: -0.01em; line-height: 1.1;
   text-wrap: balance;
 }
-.brand p { margin: 6px 0 0; color: var(--muted); font-size: var(--text-sm); }
 .search { flex: 1 1 280px; max-width: 420px; }
 .search input {
   width: 100%;

@@ -22,18 +22,6 @@ from scipy.spatial.transform import Rotation, Slerp
 #: environment. A motion at another rate would force the loader to interpolate.
 FPS: int = 50
 
-#: The Hub dataset repo that holds the published motions.
-DATASET_REPO_ID: str = "Berkeley-Humanoids/Lite-LAFAN1-Dataset"
-
-#: The one source that the Hub repo holds. The terms of the other sources forbid it: AMASS
-#: bars any redistribution, and ChingMu bars hosting MotionDecode as a competing dataset.
-#: Their motions stay in the local store, for training.
-PUBLIC_SOURCE: str = "lafan1"
-
-#: The static Space that hosts the motion browser. The browser reads the motions from the
-#: dataset repo.
-SPACE_REPO_ID: str = "Berkeley-Humanoids/Lite-Motions"
-
 #: The clone of this repo. The package runs as an editable install of its clone, and keeps
 #: its data in the clone, beside the code.
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]

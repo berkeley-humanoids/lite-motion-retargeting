@@ -21,9 +21,10 @@ You can [open one in a browser][viewer], or browse all of them in the
 | `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | No |
 | `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | No |
 
-`src/lite_motion_retargeting/sources.py` defines each source and its loader. The `amass` and `motiondecode`
-motions stay in your local store, `dataset/`, for training. `publish.py` uploads only
-`lafan1`.
+`src/lite_motion_retargeting/sources.py` defines each source and its loader. The `amass`
+and `motiondecode` motions stay in your local store, `dataset/`, for training. Of the
+other sources, `uv run publish` uploads only `lafan1`. See
+[Publish to the Hub](#publish-to-the-hub).
 
 `lafan1bvh` is the human motion that the authors of `lafan1` retargeted: the BVH takes of
 Ubisoft's LAFAN1. These takes come as a zip on GitHub, not on the Hub. `lafan1` holds 40
@@ -87,7 +88,41 @@ uv run download --source lafan1bvh
 uv run retarget --source lafan1bvh --clip '^walk1_subject1$' --validate-only
 ```
 
-To write to the Hub, run `hf auth login` or set `HF_TOKEN`.
+### Publish to the Hub
+
+`uv run publish` uploads Hub datasets from the store. A Hub dataset is one Hub dataset
+repo with its own card, and it holds the motions of one or more sources. `HUB_DATASETS` in
+`src/lite_motion_retargeting/hub.py` lists them:
+
+| Hub dataset | Repo | Sources | Card |
+|---|---|---|---|
+| `lafan1` | [`Berkeley-Humanoids/Lite-LAFAN1-Dataset`][dataset] | `lafan1` | `cards/lafan1.md` |
+
+Each repo holds the layers of its motions, a file per motion, and in `web/` the same
+motions in the form that the motion browser plays. `uv run publish` fills the motion index
+of the card, and uploads the card, the layers and `web/` in one commit. Then it uploads
+the page to the [Space][space], with a collection for the `web/` of each Hub dataset. Thus
+the Space plays the motions of every Hub dataset on one page.
+
+```bash
+uv run publish --dry-run          # write dataset/hub/<name>/, and upload nothing
+uv run publish                    # every Hub dataset, then the page
+uv run publish --datasets lafan1  # one Hub dataset, then the page
+uv run publish --datasets         # only the page
+```
+
+`--clear` deletes each file in a repo that the upload does not replace. To write to the
+Hub, run `hf auth login` or set `HF_TOKEN`.
+
+To add a Hub dataset, add an entry to `HUB_DATASETS` and a card to `cards/`. A source goes
+to one Hub dataset at most. Then retarget its sources again: `uv run retarget` writes the
+robot geometry into each motion of a Hub dataset, so that the motion opens alone in the
+Rerun web viewer. A Hub dataset with `private=True` goes to a private repo. In the Space,
+its motions show only to a visitor who signs in with an account that can read the repo.
+
+**Warning:** Check the license of a source before you add it to a Hub dataset. A private
+repo still shares the motions with each account that can read it. The licenses of AMASS
+and MotionDecode do not allow you to share their motions.
 
 ### Browse the motions
 
@@ -128,14 +163,15 @@ line up and both stand with their soles on the floor.
 
 `site/collections.json` lists the collections that the page reads: folders of motion data,
 `data/` by default. A collection can also be on the Hub, because the Hub answers range
-requests from any site. The [Space][space] works this way: `publish.py` writes the LAFAN1
-motions for the page into `web/` of the dataset repo. Then it uploads `site/` to the
-static Space, with a `collections.json` that points at `web/` as of that commit. A
-collection marked `"private": true` loads only for a visitor who signs in with Hugging
-Face. The page reads it with the token of that account, so a private repo shows only to
-the people who can read it.
+requests from any site. The [Space][space] works this way: its `collections.json` points
+at `web/` of each Hub dataset, as of the last commit to that repo. A collection marked
+`"private": true` loads only for a visitor who signs in with Hugging Face. The page reads
+it with the token of that account, so a private repo shows only to the people who can read
+it. The page merges the collections into one list, and draws the robot of the first.
 
-| Script | What it does |
+### The package
+
+| Module | What it does |
 |---|---|
 | `download.py` | Downloads the G1 model into `.cache/g1/`, and a source into `.cache/<source>/`. |
 | `retarget.py` | Retargets each clip, measures it, and writes its two layers under `dataset/`. |
@@ -144,7 +180,8 @@ the people who can read it.
 | `mapping.py` | Builds the goal of each Lite link from a human pose, plants the feet, and solves the IK that reaches the goals. |
 | `reactor.py` | Retargets the motions of a store again, in physics, with the RL method of ReActor. See [ReActor](#reactor). |
 | `store.py` | Defines the file format. |
-| `publish.py` | Fills the motion index of `DATASET_CARD.md`, and uploads the card, the store and the page data to the dataset repo. Then uploads the page to the Space. |
+| `hub.py` | Lists the Hub datasets, and names the Space. |
+| `publish.py` | Uploads each Hub dataset with its card and its page data. Then uploads the page to the Space. |
 | `build_site.py` | Writes the motions and the robot meshes for the page into `site/data/`. |
 | `serve.py` | Serves `site/` on this machine, and answers range requests. |
 | `common.py` | Holds the G1 joint table, the model loaders, resampling, forward kinematics, the soles, and foot contacts. |
@@ -156,8 +193,8 @@ regex of `--clip` matches the path of a clip below the clip directory of its sou
 without the suffix, such as `CMU/07/07_01_poses_120_jpos`. The motion name comes from the
 same path: `amass_CMU_07_07_01_poses_120_jpos`.
 
-`publish.py` takes `--dry-run`, `--repo-id <id>`, `--space-id <id>` and `--clear`.
-`--clear` deletes every file in the dataset repo that this store does not replace.
+`publish.py` takes `--datasets <name>...`, `--clear` and `--dry-run`, as
+[Publish to the Hub](#publish-to-the-hub) shows.
 
 ### Cost
 
@@ -182,8 +219,8 @@ One MotionDecode clip is empty upstream. On 128 cores, `retarget.py` took 3 h 40
 
 The store holds the 9 MB robot geometry once, in `dataset/assets/lite_pro.rrd`.
 `rerun --asset` attaches the geometry to the motion that you open. Only the native viewer
-loads assets. The dataset card on the Hub opens a `lafan1` motion in the web viewer, so
-each `lafan1` motion carries its own copy of the geometry.
+loads assets. The card of a Hub dataset opens a motion in the web viewer, so each motion of
+a Hub dataset carries its own copy of the geometry.
 
 ## How a clip is retargeted
 
@@ -376,7 +413,7 @@ code.
 `store.py` writes the store, `dataset/`, as one directory per layer: `base/` for the
 source clip as published at its own rate, `lite_pro/` for the 50 Hz retargeted motion,
 `assets/` for the robot geometry, and `blueprints/` for the viewer layout.
-`DATASET_CARD.md` documents the store, and `store.py` documents every entity path.
+`cards/lafan1.md` documents the store, and `store.py` documents every entity path.
 
 Training and deployment read the robot layer. The robot layer is self-contained: its
 joints reset the robot, and its body poses are the goal. The goal uses the frame

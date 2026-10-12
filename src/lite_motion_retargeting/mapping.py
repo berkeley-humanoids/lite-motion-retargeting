@@ -26,7 +26,10 @@ from typing import NamedTuple
 
 import mujoco
 import numpy as np
-from common import (
+from lite_description import get_mjcf_path
+from scipy.ndimage import uniform_filter1d
+
+from .common import (
     FPS,
     Sole,
     body_id,
@@ -35,9 +38,7 @@ from common import (
     quat_mul,
     sole_points,
 )
-from human import HUMAN_BODIES, HUMAN_PARENTS
-from lite_description import get_mjcf_path
-from scipy.ndimage import uniform_filter1d
+from .human import HUMAN_BODIES, HUMAN_PARENTS
 
 #: Human body -> the Lite link at the joint that the body turns about. A toe has none.
 ANCHORS: dict[str, str] = {

@@ -21,7 +21,7 @@ You can [open one in a browser][viewer], or browse all of them in the
 | `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | No |
 | `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | No |
 
-`scripts/sources.py` defines each source and its loader. The `amass` and `motiondecode`
+`src/lite_motion_retargeting/sources.py` defines each source and its loader. The `amass` and `motiondecode`
 motions stay in your local store, `dataset/`, for training. `publish.py` uploads only
 `lafan1`.
 
@@ -47,29 +47,44 @@ subsets, such as CMU, are less restrictive than AMASS as a whole.
 
 ## Use
 
+`uv sync` installs the package, `src/lite_motion_retargeting/`, with a command for each
+step of the pipeline:
+
+| Command | Reads | Writes |
+|---|---|---|
+| `uv run download` | a source, on the Hub or the web | `.cache/<source>/` |
+| `uv run retarget` | `.cache/<source>/` | the store, `dataset/` |
+| `uv run reactor train`, `uv run reactor export` | the store | `logs/reactor/`, then another store |
+| `uv run build-site` | the store | the browser data, `site/data/` |
+| `uv run serve` | `site/` | |
+| `uv run publish` | the store, `site/` | the Hub dataset repos, and the Space |
+
+`uv run <command> --help` lists the options of a command. The package runs from its
+clone: it keeps `.cache/`, `dataset/` and `logs/` beside the code.
+
 ```bash
 uv sync
-uv run scripts/download.py               # G1 model and LAFAN1 -> .cache/
-uv run scripts/retarget.py --workers -1  # every clip, every core
+uv run download               # G1 model and LAFAN1 -> .cache/
+uv run retarget --workers -1  # every clip, every core
 uv run rerun dataset/*/lafan1_walk1_subject1.rrd dataset/blueprints/lite_pro.rbl
-uv run scripts/publish.py --clear        # upload LAFAN1 and the browser to the Hub
+uv run publish --clear        # upload LAFAN1 and the browser to the Hub
 ```
 
-To retarget another source, pass `--source` to both scripts. To download part of a large
+To retarget another source, pass `--source` to both steps. To download part of a large
 source, pass Hub glob patterns to `--include`:
 
 ```bash
-uv run scripts/download.py --source amass --include 'g1/CMU/**'
-uv run scripts/retarget.py --source amass --clip '^CMU/' --workers -1
+uv run download --source amass --include 'g1/CMU/**'
+uv run retarget --source amass --clip '^CMU/' --workers -1
 uv run rerun dataset/*/amass_CMU_07_07_01_poses_120_jpos.rrd \
     --asset dataset/assets/lite_pro.rrd dataset/blueprints/lite_pro.rbl
 
-uv run scripts/download.py --source motiondecode \
+uv run download --source motiondecode \
     --include 'samples/1.3.Basic_Gait_Category/**' 'samples/5.Dance/**'
-uv run scripts/retarget.py --source motiondecode --workers -1
+uv run retarget --source motiondecode --workers -1
 
-uv run scripts/download.py --source lafan1bvh
-uv run scripts/retarget.py --source lafan1bvh --clip '^walk1_subject1$' --validate-only
+uv run download --source lafan1bvh
+uv run retarget --source lafan1bvh --clip '^walk1_subject1$' --validate-only
 ```
 
 To write to the Hub, run `hf auth login` or set `HF_TOKEN`.
@@ -83,8 +98,8 @@ that opens the motion in Rerun. To open a motion directly, add `#<motion>` to th
 the address.
 
 ```bash
-uv run scripts/build_site.py                      # dataset/ -> site/data/
-uv run scripts/serve.py                           # then open http://localhost:8000
+uv run build-site                      # dataset/ -> site/data/
+uv run serve                           # then open http://localhost:8000
 ```
 
 `build_site.py` reads the robot layer of each motion, which is the layer that training
@@ -294,8 +309,8 @@ wrote, human or G1. ReActor welds every joint that no motion drives, such as the
 The `reactor` extra adds mjlab, which pins MuJoCo to 3.11 for the whole project.
 
 ```bash
-uv run --extra reactor scripts/reactor.py train --source lafan1bvh --clip '^walk' --iterations 3000
-uv run --extra reactor scripts/reactor.py export --run logs/reactor/<run> --out dataset_reactor
+uv run --extra reactor reactor train --source lafan1bvh --clip '^walk' --iterations 3000
+uv run --extra reactor reactor export --run logs/reactor/<run> --out dataset_reactor
 ```
 
 `train` writes its run to `logs/reactor/`, with the motions that it read (`library.npz`),

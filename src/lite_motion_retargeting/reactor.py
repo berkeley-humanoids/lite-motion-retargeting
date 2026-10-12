@@ -27,13 +27,12 @@ metrics of ``retarget.motion_metrics``. ReActor welds each joint that no motion 
 such as a finger joint.
 
 Usage:
-    uv run --extra reactor scripts/reactor.py train --source lafan1bvh --clip '^walk'
-    uv run --extra reactor scripts/reactor.py export --run logs/reactor/<run> --out dataset_reactor
+    uv run --extra reactor reactor train --source lafan1bvh --clip '^walk'
+    uv run --extra reactor reactor export --run logs/reactor/<run> --out dataset_reactor
 """
 
 import re
 import shutil
-import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -89,14 +88,13 @@ from mjlab.utils.lab_api.math import (
 )
 from rerun.chunk import RrdReader
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import CACHE_ROOT, FPS, lite_urdf_path, planted  # noqa: E402
-from mapping import FEET  # noqa: E402
-from retarget import DATASET_ROOT, load_models, motion_metrics  # noqa: E402
-from sources import SOURCES, clip_key, motion_name  # noqa: E402
-from store import BASE_LAYER, write_asset, write_blueprint, write_robot_layer  # noqa: E402
+from .common import CACHE_ROOT, DATASET_ROOT, FPS, REPO_ROOT, lite_urdf_path, planted
+from .mapping import FEET
+from .retarget import load_models, motion_metrics
+from .sources import SOURCES, clip_key, motion_name
+from .store import BASE_LAYER, write_asset, write_blueprint, write_robot_layer
 
-LOG_ROOT: Path = Path(__file__).resolve().parent.parent / "logs" / "reactor"
+LOG_ROOT: Path = REPO_ROOT / "logs" / "reactor"
 ROBOT: str = "lite_pro"
 DEVICE: str = "cuda:0"
 
@@ -145,7 +143,7 @@ def motion_paths(source: str, clip: str | None, store: Path) -> list[Path]:
         raise SystemExit(f"No clip in {clip_dir} matches {clip!r}.")
     missing = [path for path in paths if not path.exists()]
     if missing:
-        raise SystemExit(f"{len(missing)} of {len(paths)} motions are not in {store}. Run scripts/retarget.py.")
+        raise SystemExit(f"{len(missing)} of {len(paths)} motions are not in {store}. Run `uv run retarget`.")
     return paths
 
 
@@ -748,8 +746,8 @@ def train(
     """Train the policy and the goal offsets on the motions of ``source`` in ``store``.
 
     Args:
-        source: A key of ``sources.SOURCES``. ``retarget.py`` must first write its motions to ``store``.
-        clip: A regex on the path of a clip, as in ``retarget.py``.
+        source: A key of ``sources.SOURCES``. ``uv run retarget`` must first write its motions to ``store``.
+        clip: A regex on the path of a clip, as in ``uv run retarget``.
         store: The store to read the motions from.
         num_envs: The number of parallel simulations.
         iterations: The number of PPO iterations.
@@ -880,5 +878,6 @@ def export(run: Path, out: Path, checkpoint: str | None = None) -> None:
           f"Play lost track {len(pieces) - len(names)} times.")
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Run :func:`train` or :func:`export`, as the command line says."""
     tyro.extras.subcommand_cli_from_dict({"train": train, "export": export})

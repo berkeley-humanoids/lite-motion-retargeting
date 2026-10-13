@@ -27,6 +27,7 @@ reactor = ["mjlab>=1.6"]
 download = "lite_motion_retargeting.scripts.download:main"
 retarget = "lite_motion_retargeting.scripts.retarget:main"
 reactor = "lite_motion_retargeting.scripts.reactor:main"
+compare = "lite_motion_retargeting.scripts.compare:main"
 build-site = "lite_motion_retargeting.scripts.build_site:main"
 serve = "lite_motion_retargeting.scripts.serve:main"
 publish = "lite_motion_retargeting.scripts.publish:main"

@@ -57,6 +57,7 @@ step of the pipeline:
 | `uv run download` | a source, on the Hub or the web | `.cache/<source>/` |
 | `uv run retarget` | `.cache/<source>/` | the store, `dataset/` |
 | `uv run reactor train`, `uv run reactor export` | the store | `logs/reactor/`, then another store |
+| `uv run compare` | the store, a ReActor store, the motions of UMR | a table of metrics |
 | `uv run build-site` | the store | the browser data, `site/data/` |
 | `uv run serve` | `site/` | |
 | `uv run publish` | the store, `site/` | the Hub dataset repos, and the Space |
@@ -186,7 +187,7 @@ modules are the library that the steps share:
 
 | Module | What it does |
 |---|---|
-| `scripts/` | A module per command: `download.py`, `retarget.py`, `reactor.py`, `build_site.py`, `serve.py` and `publish.py`. `pyproject.toml` lists the commands. |
+| `scripts/` | A module per command: `download.py`, `retarget.py`, `reactor.py`, `compare.py`, `build_site.py`, `serve.py` and `publish.py`. `pyproject.toml` lists the commands. |
 | `sources/` | Defines the sources and the rule that names a motion. `g1.py` reads the G1 sources. `human.py` defines the human skeleton that every human source maps onto, and reads LAFAN1 BVH files. |
 | `retargeting/` | Retargets one clip, grounds it, and measures it. `g1.py` is the G1 path. `human.py` builds the goal of each Lite link from a human pose, plants the feet, and solves the IK that reaches the goals. |
 | `reactor/` | The mjlab environment of ReActor: its terms in `mdp.py`, its configs in `env_cfg.py`, and the motions that it reads in `library.py`. See [ReActor](#reactor). |

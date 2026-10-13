@@ -268,14 +268,20 @@ def retarget_clip(
     )
 
 
+def human_planted(pos: np.ndarray) -> np.ndarray:
+    """Return which feet of a human clip stand on the floor, ``(T, 2)``, left first.
+
+    ``pos`` holds the world positions of :data:`HUMAN_BODIES` at :data:`store.FPS`. A foot is
+    planted while its ankle or its toe is, as :func:`kinematics.planted` decides.
+    """
+    points = [[HUMAN_BODIES.index(f"{side}_{point}") for point in ("foot", "toe")] for side in ("left", "right")]
+    return planted(pos[:, points], FPS)
+
+
 def _retarget_human(models: Models, clip: HumanClip, ik_iters: int) -> Clip:
     """Retarget one human clip: goals from ``human.py``, then the floating-base IK."""
     pos, quat = resample_poses(clip.pos, clip.quat, clip.fps, FPS)
-    foot_points = [
-        [HUMAN_BODIES.index(f"{side}_{point}") for point in ("foot", "toe")]
-        for side in ("left", "right")
-    ]
-    feet_planted = planted(pos[:, foot_points], FPS)
+    feet_planted = human_planted(pos)
     goal_pos, goal_quat = goals(pos, quat, calibrate(models.lite, clip.rest))
     goal_pos = plant(goal_pos, goal_quat, feet_planted, sole(models.lite, FEET))
     base_pos, base_quat, joint_pos = solve_ik(

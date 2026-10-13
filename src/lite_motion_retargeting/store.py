@@ -1,4 +1,4 @@
-"""Write a retargeted motion as the layers of a Rerun store.
+"""Write a retargeted motion as the layers of a Rerun store, and read a robot layer back.
 
 A layer is a stage of the pipeline, a directory, and one file per motion:
 
@@ -62,8 +62,10 @@ Rerun stores a rotation as xyzw. MuJoCo, and every array this module takes, uses
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun.chunk import RrdReader
 
 from .kinematics import quat_mul
 
@@ -208,6 +210,42 @@ def write_robot_layer(
             ),
         )
     return path
+
+
+def read_robot_layer(path: Path, robot: str) -> dict:
+    """Read the ``robot`` layer at ``path``: its joints, its goals, and the joints that its source drives."""
+    columns: dict[str, list[pa.RecordBatch]] = {}
+    properties = None
+    for chunk in RrdReader(path).stream():
+        entity = chunk.entity_path
+        if entity == f"/__properties/{robot}":
+            properties = chunk.to_record_batch().to_pydict()
+        elif entity == f"/{robot}/joint/positions" or entity.startswith(f"/{robot}/goal/poses/"):
+            columns.setdefault(entity, []).append(chunk.to_record_batch())
+    if properties is None:
+        raise SystemExit(f"{path} has no /__properties/{robot}, so it is not a robot layer.")
+
+    def values(entity: str, component: str, width: int) -> np.ndarray:
+        table = pa.Table.from_batches(columns[entity]).sort_by("frame")
+        flat = table.column(component).combine_chunks().flatten()
+        if pa.types.is_fixed_size_list(flat.type):
+            flat = flat.flatten()
+        return flat.to_numpy().astype(np.float32).reshape(-1, width)
+
+    joint_names = properties["joint_names"][0]
+    bodies = properties["body_names"][0]
+    poses = [f"/{robot}/goal/poses/{body}" for body in bodies]
+    goal_quat = np.stack([values(entity, "Transform3D:quaternion", 4) for entity in poses], axis=1)
+    return {
+        "fps": properties["fps"][0][0],
+        "joint_names": joint_names,
+        "active": properties["active_joint_names"][0],
+        "bodies": bodies,
+        "sources": properties["source_body_names"][0],
+        "joint_pos": values(f"/{robot}/joint/positions", "Scalars:scalars", len(joint_names)),
+        "goal_pos": np.stack([values(entity, "Transform3D:translation", 3) for entity in poses], axis=1),
+        "goal_quat": goal_quat[..., [3, 0, 1, 2]],  # Rerun stores xyzw.
+    }
 
 
 def write_asset(root: Path, urdf_path: Path) -> Path:

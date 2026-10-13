@@ -192,7 +192,7 @@ modules are the library that the steps share:
 | `reactor/` | The mjlab environment of ReActor: its terms in `mdp.py`, its configs in `env_cfg.py`, and the motions that it reads in `library.py`. See [ReActor](#reactor). |
 | `robots.py` | Loads the Lite and G1 models, and names their joints and bodies. |
 | `kinematics.py` | Resampling, forward kinematics, the soles, and foot contacts. |
-| `store.py` | Defines the file format. |
+| `store.py` | Defines the file format, and reads a robot layer back. |
 | `browser.py` | Writes the motions and the robot meshes for the page. |
 | `hub.py` | Lists the Hub datasets, and names the Space. |
 

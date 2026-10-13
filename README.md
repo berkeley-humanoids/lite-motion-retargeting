@@ -331,8 +331,8 @@ means over the 40 LAFAN1 takes that both sources hold, with the current Lite Pro
 
 | Path | Foot slide | Planted gap | Penetration | Fastest joint |
 |---|---|---|---|---|
-| `lafan1bvh`, human | 2.6 cm/s | 0.40 cm | 1.1 cm | 19 rad/s |
-| `lafan1`, G1 | 9.2 cm/s | 1.53 cm | 4.1 cm | 21 rad/s |
+| `lafan1bvh`, human | 2.6 cm/s | 0.40 cm | 1.05 cm | 19 rad/s |
+| `lafan1`, G1 | 9.2 cm/s | 1.52 cm | 4.07 cm | 21 rad/s |
 
 The human path has less foot slide, a smaller planted gap, and less penetration on 39 or
 more of the 40 takes.
@@ -385,42 +385,33 @@ again from the IK solution. It writes each piece of 2 s or more as
 `<motion>_f<first frame>`. A motion without a stumble keeps its name. The pieces after a
 stumble track the goals less well, and their metrics show this.
 
-Two runs on LAFAN1 give the first results:
+Four runs give these results. Two ran on an older Lite Pro model, `lite-description`
+`99cdef0`, and two on the current one:
 
-| Run | Takes | Iterations | Time | Kept | Lost track | Played whole |
-|---|---|---|---|---|---|---|
-| Walking | 12 | 3,000 | 1.3 h | 99% of 48 min | 39 times | 6 takes |
-| All | 77 | 10,000 | 4.4 h | 98% of 276 min | 354 times | 26 takes |
+| Run | Model | Motions | Iterations | GPU | Time | Kept | Lost track | Played whole |
+|---|---|---|---|---|---|---|---|---|
+| Walking | `99cdef0` | 12 | 3,000 | RTX A4500 | 1.3 h | 99% of 48 min | 39 times | 6 |
+| All, 10k | `99cdef0` | 77 | 10,000 | RTX A4500 | 4.4 h | 98% of 276 min | 354 times | 26 |
+| All, 20k | current | 77 | 20,000 | RTX 3090 | 6.7 h | 99% of 276 min | 104 times | 48 |
+| Kimodo | current | 9,490 | 10,000 | RTX 3080 Ti | 6.6 h | 100% of 630 min | 71 times | 9,421 |
 
-This table compares each run with the IK, on the takes that the run played whole, weighted
-by length:
+[Compare the methods](#compare-the-methods) measures the two runs on the current model
+against the IK and UMR.
 
-| Metric | Walking run | IK | All run | IK |
-|---|---|---|---|---|
-| Foot slide | 2.75 cm/s | 1.97 cm/s | 3.53 cm/s | 2.51 cm/s |
-| Planted gap | 0.14 cm | 0.33 cm | 0.18 cm | 0.73 cm |
-| Penetration | 0.50 cm | 0.92 cm | 0.61 cm | 1.46 cm |
-| Fastest joint | | | 25 rad/s | 19 rad/s |
-| Goal error, feet | 6.8 cm | 0.2 cm | 8.3 cm | 0.3 cm |
-| Root wrench, mean | | none | 24 N | none |
-| Root wrench, peak | 65 to 107 N | none | 265 N | none |
+The policy depends on the wrench. On the 25 LAFAN1 takes that both All runs played whole,
+the 20k run pushes the pelvis with a mean wrench of 20 N, against 24 N for the 10k run. But
+its mean peak is 302 N, against 257 N. Lite Pro weighs 258 N. Over the 48 takes that the
+20k run played whole, the mean is 33 N and the mean peak 394 N, because the takes that only
+this run finishes are the hard ones. The Kimodo motions are short and calm: their mean
+wrench is 2 N, and their median peak 9 N.
 
-The simulated feet sit on the floor better than the IK feet. The All run has a smaller
-planted gap on all 26 takes, and less penetration on 23. But the feet slide more, the
-joints move faster, and the policy depends on the wrench.
-
-Lite Pro weighs 327 N. The mean wrench of the All run is 7% of that weight, and its peak
-is 80%. Over all 77 takes, the mean wrench goes from 17 N on the walking takes to 61 N on
-the obstacle takes, and no motion has a mean below 10 N. The falls and the motions on the
-ground are the worst, with a foot slide of 9 to 13 cm/s.
-
-On the walking takes, the All run does better than the Walking run. It has less foot slide
-on all 9 motions that both runs wrote, and less goal error on 7 of them. But its peak
+On the walking takes, the All, 10k run does better than the Walking run. It has less foot
+slide on all 9 motions that both runs wrote, and less goal error on 7 of them. But its peak
 wrench is higher.
 
-The paper trains for 20,000 iterations, and names the wrench penalty its most sensitive
-setting. The real test is downstream: a tracking policy without the wrench, trained on
-either set of motions.
+The 20k run trains for the 20,000 iterations of the paper. The paper names the wrench
+penalty its most sensitive setting. The real test is downstream: a tracking policy without
+the wrench, trained on these motions.
 
 This implementation differs from the paper in four places. The paper has no public code to
 compare against. The unofficial reproduction has no license, so this repo uses none of its
@@ -432,6 +423,216 @@ code.
 | Offsets on the source body frames | Offsets on the goals of `retargeting/human.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
 | Offset bounds of 0.5 | 0.1 m, 0.3 rad, 0.05 m | Lite is about 1 m tall |
 | Projected SGD on the offsets | Adam, then the projection | The paper gives no step size |
+
+## UMR
+
+[UMR](https://hanyang9.github.io/UMR/) is a kinematic retargeter, like the IK of
+`retargeting/`. It matches points on the surface of an SMPL-X body to points on the surface
+of the robot. Thus it needs no table that pairs the human bodies with the links of the
+robot. The IK and ReActor use the pairs of `retargeting/human.py`. UMR reads only SMPL-X
+motion. It takes LAFAN1 after a conversion, and AMASS in its SMPL-X form, but not a G1
+source such as Kimodo.
+
+UMR pins its own versions of torch, MuJoCo and NumPy, so it runs in an environment of its
+own, outside this package. `umr/` holds the files that run it on Lite Pro:
+
+| File | What it does |
+|---|---|
+| `lite_pro.json` | The robot config of UMR for Lite Pro. Lite Pro stands in a T-pose at zero, so the T-pose moves no joint. The joint limits hold the fingers within 0.01 rad of 0, so UMR solves the 34 joints that the IK solves. A limit of zero width stops the QP solver of UMR. |
+| `lafan1_to_smplx.py` | Converts LAFAN1 BVH takes to SMPL-X with [`lafan_to_smplx`](https://github.com/jaraujo98/lafan_to_smplx), with the 10 betas of the body that UMR builds. |
+| `ground_smplx.py` | Puts the feet of each SMPL-X take on the floor, as the authors of UMR do. The conversion leaves the bodies 2 to 6 cm below the floor, and UMR does not move them. |
+| `batch.json` | The batch config of UMR, which solves each take in order. The default of UMR solves it in both directions and then picks, which makes joints jump. |
+| `manifest.py` | Writes `manifest.json` beside the motions of a run: the hash of the robot model, the commit of UMR, and the configs. |
+
+To retarget LAFAN1 with UMR, run these steps in an empty directory beside the clone of this
+repo, such as `../umr`:
+
+1. Clone UMR at commit `d1cdaed`, and clone `lafan_to_smplx`:
+
+   ```bash
+   git clone https://github.com/hanyang9/UMR && git -C UMR checkout d1cdaed
+   git clone https://github.com/jaraujo98/lafan_to_smplx
+   ```
+
+2. Make the environment of UMR. GMR at commit `81ce42e` holds the BVH reader that
+   `lafan_to_smplx` needs:
+
+   ```bash
+   uv venv --python 3.12
+   uv pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.4.1
+   uv pip install -r UMR/requirements-umr.txt
+   uv pip install --no-deps "git+https://github.com/YanjieZe/GMR@81ce42e"
+   ```
+
+3. Download the SMPL-X v1.1 body models from the [SMPL-X site](https://smpl-x.is.tue.mpg.de/).
+   Put the `.npz` files in `body_models/smplx/`, and link them where UMR reads them:
+
+   ```bash
+   ln -s ../../body_models/smplx/SMPLX_{NEUTRAL,MALE,FEMALE}.npz UMR/smpl/
+   ```
+
+4. Copy Lite Pro and its config into UMR:
+
+   ```bash
+   lmr=../Lite-Motion-Retargeting
+   mjcf=$(cd $lmr && uv run python -c "from lite_description import get_mjcf_path; print(get_mjcf_path('lite_pro'))")
+   robot=$(dirname "$(dirname "$mjcf")")
+   mkdir -p UMR/assets/lite_pro && cp -r "$robot/mjcf" "$robot/meshes" UMR/assets/lite_pro/
+   cp $lmr/umr/lite_pro.json UMR/robot_configs/
+   cp $lmr/umr/batch.json UMR/lite_pro_batch.json
+   ```
+
+5. Convert the takes to SMPL-X on the CPU, then put them on the floor:
+
+   ```bash
+   ls $lmr/.cache/lafan1bvh/bvh | sed 's/\.bvh$//' > takes.txt
+   xargs -P 16 -n 5 .venv/bin/python $lmr/umr/lafan1_to_smplx.py lafan_to_smplx/lafan_to_smplx.py \
+       $lmr/.cache/lafan1bvh/bvh smplx body_models < takes.txt
+   xargs .venv/bin/python $lmr/umr/ground_smplx.py body_models smplx smplx_grounded < takes.txt
+   ```
+
+6. Retarget the takes, and record what made them:
+
+   ```bash
+   cd UMR && ../.venv/bin/python scripts/humanoid_retarget_pipeline_batch.py \
+       --config robot_configs/lite_pro.json --batch-config lite_pro_batch.json \
+       --motion-folder ../smplx_grounded --workers 9 --retarget-gpus 0 --output-root ../output \
+       --force-build --force-train
+   ../.venv/bin/python $lmr/umr/manifest.py robot_configs/lite_pro.json \
+       lite_pro_batch.json ../output/lite_pro
+   ```
+
+   UMR writes `output/lite_pro/<take>_lite_pro.npz`, at 30 Hz. `uv run compare`
+   interpolates it to 50 Hz. A run that solved at 50 Hz did no better.
+
+UMR resolves a relative path against the folder of its batch config, so the batch config
+goes into the clone of UMR. With 9 workers, one RTX 3080 Ti retargets the 276 min of LAFAN1
+in 33 min, and holds 7.3 GB. With 16 workers, the GPU runs out of memory.
+
+UMR keeps the correspondence of the surfaces in `UMR/output/correspondence_lite_pro_*`. The
+name of the robot and the betas of the body name this cache, and the geometry does not.
+Thus step 6 trains the correspondence again with `--force-build --force-train`. Without
+these flags, a run after a change to Lite Pro uses the old correspondence.
+`uv run compare` stops if `manifest.json` names another model than the installed Lite Pro.
+
+## Compare the methods
+
+`uv run compare` measures the IK, UMR and ReActor on the same frames of one source:
+
+```bash
+uv run compare --source lafan1bvh --umr ../umr/output/lite_pro --reactor dataset_reactor
+uv run compare --source kimodo --reactor dataset_reactor
+```
+
+The metrics that each store keeps do not compare across methods. For example,
+`reactor export` measures the slide where its learned goals plant a foot. `uv run compare`
+measures every method in the same way:
+
+- **One mask.** Every method uses the stance mask of the source: the human feet for a
+  human source, and the goals of the IK for a G1 source.
+- **The same frames.** With a ReActor store, every method is measured on the frames of
+  each ReActor piece.
+- **Pooled samples.** A mean, a median or a percentile is over every sample of every
+  piece. Thus a long motion counts more than a short one, and the cut of a motion into
+  pieces changes nothing.
+- **Fidelity to the source.** The limb direction error, the root error over 1 s and the
+  contact IoU compare each method with its source. The IK aims at the limb directions of
+  the source, so this metric favors the IK, as the slide where the source stands does.
+- **One world.** UMR uses a world turned 90° from that of the IK. `compare` turns it back
+  by that fixed angle, and shifts it by one offset per motion. UMR scales the human by its
+  height, not by the height of its pelvis, so `compare` leaves out the goal errors of UMR.
+- **One model.** Every robot layer and every UMR run records the hash of its Lite Pro
+  model. `compare` stops if a hash differs from that of the installed model.
+
+This table gives the results on LAFAN1, over the 138 pieces of the All, 20k run of
+[ReActor](#reactor), 274 of the 276 min. UMR ran as [UMR](#umr) shows.
+
+| Metric | IK | UMR | ReActor |
+|---|---|---|---|
+| Slide where the source stands, mean / median / p95 | **2.5** / **1.2** / **9.1** cm/s | 12.4 / 7.8 / 39.6 cm/s | 5.2 / 1.4 / 23.5 cm/s |
+| Slide where the sole is within 1 cm of the floor, mean / median | 29.9 / **1.8** cm/s | 37.0 / 11.7 cm/s | **14.7** / 1.9 cm/s |
+| Contact IoU with the source | 73.7% | 70.9% | **74.3%** |
+| Gap where the source stands | 0.54 cm | 0.35 cm | **0.30 cm** |
+| Penetration, p95 of frames | 1.42 cm | **0.09 cm** | 0.34 cm |
+| Fastest joint, p99 / max | 15.4 / 20.0 rad/s | **8.4** / **11.4** rad/s | 13.8 / 37.9 rad/s |
+| Limb direction error | **4.3°** | 19.9° | 9.1° |
+| Root error over 1 s | **2.8 cm** | 6.3 cm | 6.6 cm |
+| Goal error, feet / hands | 0.32 / 0.67 cm | | 10.0 / 9.7 cm |
+
+Kimodo is a G1 source, so UMR cannot read it, and the IK copies the G1 joints without foot
+planting. This table covers its 9,461 ReActor pieces, 627 of 630 min:
+
+| Metric | IK | ReActor |
+|---|---|---|
+| Slide where the source stands, mean / median / p95 | 3.5 / 1.5 / 13.4 cm/s | **1.1** / **0.25** / **2.8** cm/s |
+| Slide where the sole is within 1 cm of the floor, mean / median | 9.0 / 1.8 cm/s | **3.4** / **0.30** cm/s |
+| Contact IoU with the source | 82.0% | **85.0%** |
+| Gap where the source stands | 0.53 cm | **0.26 cm** |
+| Penetration, p95 of frames | 1.05 cm | **0.19 cm** |
+| Fastest joint, p99 / max | 9.8 / 56.3 rad/s | **8.1** / **37.3** rad/s |
+| Goal error, feet / hands | **6.55** / 13.61 cm | 8.13 / **12.76** cm |
+
+No method is best on every metric:
+
+- **The IK** keeps a foot still where the source stands, and copies the limbs of the
+  source most closely. It plants its goals on exactly those frames, so both metrics measure
+  what it aims for. Where a sole is near the floor, its median slide is low, but its mean is
+  17 times its median: a few frames, such as a swing foot low over the floor, slide fast.
+  Its feet sink the deepest.
+- **ReActor** sits on the floor best, and its feet slide the least where a sole is near the
+  floor. On Kimodo, it beats the IK on every floor metric. On LAFAN1, one of its joints
+  peaks at 38 rad/s, its feet leave the goals of the IK by 10 cm, its limbs turn 9° from
+  the source, and it needs the wrench. The motions on the ground are its worst: their feet
+  slide 11.6 cm/s where the source stands.
+- **UMR** sinks the least, and moves its joints the slowest. But where the source stands,
+  its feet slide 5 times as fast as those of the IK, and its limbs turn 20° from the
+  source. UMR scales the human by 0.77 and the IK by 0.84, so a UMR root travels about 8%
+  less, which adds to its root error. [Why UMR slides](#why-umr-slides) shows that the slide
+  comes from its input.
+
+These metrics measure the motions, not the tracking policy that trains on them.
+
+The three methods also differ in cost, on the 276 min of LAFAN1:
+
+| Method | Runs on | Time |
+|---|---|---|
+| IK | CPU | 2.3 h on one core, or 5.4 min with 40 workers |
+| UMR | GPU | 33 min on one RTX 3080 Ti, with 9 workers |
+| ReActor | GPU | 6.7 h of training on one RTX 3090 for 20,000 iterations, then 6 min of export |
+
+### Why UMR slides
+
+An outside audit of this comparison named possible causes of the UMR slide. Each row of
+this table changes one thing, on 8 LAFAN1 takes of 8 kinds, 27 min. The IK slides 2.2 cm/s
+on them, in the mean.
+
+| UMR setup | Slide where the source stands, mean / median | Fastest joint |
+|---|---|---|
+| 1. The first run: 16 betas, the 5th-percentile grounding, solved in both directions | 11.5 / 7.6 cm/s | 27.7 rad/s |
+| 2. 10 betas, and the grounding of the UMR authors | 11.5 / 7.5 cm/s | 27.7 rad/s |
+| 3. Row 2, without the smoothing | 12.1 / 7.0 cm/s | 39.1 rad/s |
+| 4. Row 2, with the fingers held at 0 | 11.5 / 7.5 cm/s | 27.8 rad/s |
+| 5. Row 2, solved at 50 Hz | 11.7 / 7.9 cm/s | 23.3 rad/s |
+| 6. Row 2, solved in order | 11.4 / 7.7 cm/s | 10.9 rad/s |
+| 7. The setup of [UMR](#umr), with a ground anchor cost of 50, not 5 | 19.3 / 7.6 cm/s | 11.7 rad/s |
+| 8. The same, with a ground anchor cost of 500 | 30.5 / 11.7 cm/s | 11.2 rad/s |
+
+- **The input matches that of the authors.** `lafan1_to_smplx.py` gives the poses of the
+  `dance1_subject2` file that UMR ships, and `ground_smplx.py` its height, to 1 mm.
+- **No change to the input or the solver brings the slide near that of the IK.** Solving in
+  order keeps the slide and stops the joint jumps, because the bidirectional selection of
+  UMR ignores the root. [UMR](#umr) now runs this way.
+- **A stronger ground anchor makes the slide worse.** The anchor holds a point of the foot
+  while the source foot slides, then lets go.
+- **UMR slides as much on the G1, the robot of the UMR paper.** On the same 8 takes at
+  30 Hz, a G1 foot slides 11.7 / 8.0 cm/s, and a Lite Pro foot 12.1 / 7.9 cm/s. Thus the
+  slide does not come from the Lite Pro config.
+- **The input slides.** Where the human stands, the feet of the SMPL-X conversion slide
+  7.0 cm/s, and those of the BVH 2.1 cm/s. UMR follows the surface of its input. Its ground
+  anchors are active in 97% of the frames of `walk1_subject1`, but they do not stop the
+  slide.
+
+A fair test of UMR needs SMPL-X motion whose feet do not slide, such as AMASS.
 
 ## The file format
 

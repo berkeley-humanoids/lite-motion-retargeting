@@ -68,6 +68,7 @@ import rerun.blueprint as rrb
 from rerun.chunk import RrdReader
 
 from .kinematics import quat_mul
+from .robots import model_hash
 
 #: The rate of every written motion, which is the control rate of the training
 #: environment. A motion at another rate would force the loader to interpolate.
@@ -164,6 +165,9 @@ def write_robot_layer(
     ``active_joints`` are the joints that the source drives, kept as
     ``active_joint_names``. Every other joint holds its default, 0, so a motion says which
     part of the robot it can train.
+
+    The ``model`` property is the ``robots.model_hash`` of the MJCF beside the URDF, so that a
+    reader can tell which version of the robot a motion is for.
     """
     robot = _robot_name(urdf_path)
     tree = _urdf_tree(urdf_path, robot)
@@ -176,6 +180,7 @@ def write_robot_layer(
         stream.send_recording_name(name)
         stream.send_property(robot, rr.AnyValues(
             robot=robot,
+            model=model_hash(urdf_path.parent.parent / "mjcf" / f"{urdf_path.stem}.xml"),
             fps=fps,
             joint_names=list(joint_names),
             body_names=list(body_names),
@@ -213,7 +218,11 @@ def write_robot_layer(
 
 
 def read_robot_layer(path: Path, robot: str) -> dict:
-    """Read the ``robot`` layer at ``path``: its joints, its goals, and the joints that its source drives."""
+    """Read the ``robot`` layer at ``path``: its joints, its goals, and the joints that its source drives.
+
+    ``model`` is the hash of the robot model that the layer was written for, or None for a
+    layer that does not record it.
+    """
     columns: dict[str, list[pa.RecordBatch]] = {}
     properties = None
     for chunk in RrdReader(path).stream():
@@ -238,6 +247,7 @@ def read_robot_layer(path: Path, robot: str) -> dict:
     goal_quat = np.stack([values(entity, "Transform3D:quaternion", 4) for entity in poses], axis=1)
     return {
         "fps": properties["fps"][0][0],
+        "model": properties["model"][0][0] if "model" in properties else None,
         "joint_names": joint_names,
         "active": properties["active_joint_names"][0],
         "bodies": bodies,

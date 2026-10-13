@@ -1,5 +1,6 @@
 """Resampling, forward kinematics, the soles of the feet, and foot contacts."""
 
+from itertools import product
 from typing import NamedTuple
 
 import mujoco
@@ -138,34 +139,46 @@ def world_poses(
 
 
 class Sole(NamedTuple):
-    """The collision boxes of each foot, in the frame of its body, one entry per foot.
+    """The collision geoms of each foot, in the frame of its body, one entry per foot.
 
-    Each collision geom counts as the box that MuJoCo bounds it with (``geom_aabb``), which
-    is exact for a box and for a level capsule. The visual mesh does not count, because it
-    does not touch the floor in simulation.
+    Each geom is a set of points and a radius: the lowest point of the geom is the lowest of
+    its points, moved down by its radius. A box is its 8 corners with no radius, a capsule
+    the 2 ends of its segment with its radius, and a sphere its center with its radius. Thus
+    the lowest point is exact at any tilt. The visual mesh does not count, because it does
+    not touch the floor in simulation.
     """
 
-    centers: list[np.ndarray]
-    rotations: list[np.ndarray]
-    halves: list[np.ndarray]
+    points: list[np.ndarray]
+    radii: list[np.ndarray]
 
 
 def sole(model: mujoco.MjModel, foot_names: tuple[str, ...]) -> Sole:
-    """Measure the collision boxes of ``foot_names`` on ``model``."""
-    centers, rotations, halves = [], [], []
+    """Return the collision geoms of ``foot_names`` on ``model``."""
+    points, radii = [], []
     for name in foot_names:
         foot = body_id(model, name)
-        geoms = [
-            g for g in range(model.ngeom)
-            if model.geom_bodyid[g] == foot and (model.geom_contype[g] or model.geom_conaffinity[g])
-        ]
-        rotation = Rotation.from_quat(model.geom_quat[geoms][:, [1, 2, 3, 0]]).as_matrix()
-        centers.append(
-            model.geom_pos[geoms] + np.einsum("gij,gj->gi", rotation, model.geom_aabb[geoms, :3])
-        )
-        rotations.append(rotation)
-        halves.append(model.geom_aabb[geoms, 3:])
-    return Sole(centers, rotations, halves)
+        foot_points, foot_radii = [], []
+        for g in range(model.ngeom):
+            if model.geom_bodyid[g] != foot or not (model.geom_contype[g] or model.geom_conaffinity[g]):
+                continue
+            size, kind = model.geom_size[g], model.geom_type[g]
+            if kind == mujoco.mjtGeom.mjGEOM_BOX:
+                local, radius = np.array(list(product(*((-s, s) for s in size)))), 0.0
+            elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                local, radius = np.array([[0.0, 0.0, -size[1]], [0.0, 0.0, size[1]]]), size[0]
+            elif kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+                local, radius = np.zeros((1, 3)), size[0]
+            else:
+                raise ValueError(
+                    f"{name} has a {mujoco.mjtGeom(kind).name} collision geom. "
+                    "A sole holds only boxes, capsules and spheres."
+                )
+            rotation = Rotation.from_quat(model.geom_quat[g][[1, 2, 3, 0]]).as_matrix()
+            foot_points.append(model.geom_pos[g] + local @ rotation.T)
+            foot_radii.append(np.full(len(local), radius))
+        points.append(np.concatenate(foot_points))
+        radii.append(np.concatenate(foot_radii))
+    return Sole(points, radii)
 
 
 def lowest_points(foot_sole: Sole, foot_pos: np.ndarray, foot_rot: np.ndarray) -> np.ndarray:
@@ -174,16 +187,13 @@ def lowest_points(foot_sole: Sole, foot_pos: np.ndarray, foot_rot: np.ndarray) -
     ``foot_pos`` ``(T, F, 3)`` and the rotation matrices ``foot_rot`` ``(T, F, 3, 3)`` are
     the world pose of each foot body.
     """
-    points = np.empty(foot_pos.shape, dtype=np.float32)
+    points = np.empty(foot_pos.shape)
+    frames = np.arange(foot_pos.shape[0])
     for f in range(foot_pos.shape[1]):
-        rotations = np.einsum("tij,gjk->tgik", foot_rot[:, f], foot_sole.rotations[f])
-        centers = foot_pos[:, f, None] + np.einsum(
-            "tij,gj->tgi", foot_rot[:, f], foot_sole.centers[f]
-        )
-        # A box reaches lowest at the corner whose every axis points down.
-        down = -np.sign(rotations[:, :, 2, :]) * foot_sole.halves[f]
-        lowest = centers + np.einsum("tgij,tgj->tgi", rotations, down)
-        points[:, f] = lowest[np.arange(len(lowest)), np.argmin(lowest[..., 2], axis=1)]
+        world = foot_pos[:, f, None] + np.einsum("tij,kj->tki", foot_rot[:, f], foot_sole.points[f])
+        lowest = np.argmin(world[..., 2] - foot_sole.radii[f], axis=1)
+        points[:, f] = world[frames, lowest]
+        points[:, f, 2] -= foot_sole.radii[f][lowest]
     return points
 
 

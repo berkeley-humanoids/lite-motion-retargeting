@@ -5,7 +5,9 @@ is the model that the authors of every G1 source retargeted to. ``uv run downloa
 it in the cache.
 """
 
+import hashlib
 import re
+from functools import cache
 from pathlib import Path
 
 import mujoco
@@ -73,6 +75,28 @@ def lite_urdf_path() -> Path:
     one robot. They come from one asset package, and their joint and link names match.
     """
     return get_urdf_path("lite_pro")
+
+
+@cache
+def model_hash(mjcf_path: Path) -> str:
+    """Return a short hash of a robot MJCF and of the ``meshes`` folder beside its folder.
+
+    The hash names one version of a robot model. ``mjcf_path`` is ``<robot>/mjcf/<name>.xml``,
+    as ``lite-description`` lays it out, or the copy of it that UMR reads. UMR writes files
+    of its own into the ``mjcf`` folder, so only the MJCF itself counts. ``umr/manifest.py``
+    computes the same hash.
+    """
+    digest = hashlib.sha256()
+    meshes = mjcf_path.parent.parent / "meshes"
+    for path in [mjcf_path, *sorted(path for path in meshes.rglob("*") if path.is_file())]:
+        digest.update(path.relative_to(mjcf_path.parent.parent).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+def lite_model_hash() -> str:
+    """Return the :func:`model_hash` of the Lite Pro that ``lite-description`` installs."""
+    return model_hash(get_mjcf_path("lite_pro"))
 
 
 def load_g1_model() -> mujoco.MjModel:

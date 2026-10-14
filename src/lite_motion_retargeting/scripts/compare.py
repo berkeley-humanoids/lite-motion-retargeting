@@ -25,14 +25,16 @@ Three metrics compare a motion with its source, whatever the method aims for:
 * ``contact_iou``: where the sole of the robot is near the floor, against where the source
   stands, as the intersection over the union of the two.
 
-UMR places a motion in a world of its own. ``lafan_to_smplx`` turns the BVH axes into
-(x, -z, y), and ``sources/human.py`` into (z, x, y), so the world of UMR is that of the IK
-turned by -90 degrees about z. This step turns it back by :data:`UMR_TURN`, and shifts it by
-one offset per motion. A fit of the turn would hide an error of heading, and a fit per frame
-would hide a drift. UMR also scales the human by its height, not by the height of its pelvis
-as the IK does. Thus a UMR link is not where the goal of the IK
-is, and this step leaves out the goal errors of UMR. A joint that the source does not drive
-holds 0 in every method, as it does in the IK.
+UMR can place a motion in a world of its own. For LAFAN1, ``lafan_to_smplx`` turns the BVH
+axes into (x, -z, y), and ``sources/human.py`` into (z, x, y), so the world of UMR is that
+of the IK turned by -90 degrees about z. AMASS SMPL-X reaches UMR and the IK in its own
+world. This step turns a UMR motion by the angle of its source in :data:`UMR_TURNS`, and
+shifts it by one offset per motion. A fit of the turn would hide an error of heading, and a
+fit per frame would hide a drift.
+
+UMR scales the human by its height, not by the height of its pelvis as the IK does. Thus a
+UMR link is not where the goal of the IK is, and this step leaves out the goal errors of
+UMR. A joint that the source does not drive holds 0 in every method, as it does in the IK.
 
 Every layer records the hash of the model of Lite that it was written for, and a UMR run
 records it in ``manifest.json``. This step stops if a hash differs from that of the
@@ -79,8 +81,8 @@ LIMBS: tuple[tuple[str, str], ...] = (
     ("right_elbow_pitch", "right_hand"),
 )
 
-#: rad. The turn about z from the world of a UMR motion of LAFAN1 to the world of the IK.
-UMR_TURN: float = np.pi / 2
+#: Source -> the turn about z, in rad, from the world of a UMR motion to the world of the IK.
+UMR_TURNS: dict[str, float] = {"lafan1bvh": np.pi / 2, "amassx": 0.0}
 
 #: s. ``root_error_cm`` compares the move of the root over this time.
 ROOT_WINDOW: float = 1.0
@@ -120,12 +122,12 @@ def _yaw(quat: np.ndarray) -> np.ndarray:
 
 
 def read_umr(
-    path: Path, joint_names: tuple[str, ...], ref_pos: np.ndarray, ref_quat: np.ndarray
+    path: Path, joint_names: tuple[str, ...], ref_pos: np.ndarray, ref_quat: np.ndarray, turn: float
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Read one motion of UMR at :data:`store.FPS`, and move it into the world of the IK.
 
-    ``ref_pos`` and ``ref_quat`` are the base of the IK. The motion turns by
-    :data:`UMR_TURN`, and the shift puts the mean of the two roots together. Returns the
+    ``ref_pos`` and ``ref_quat`` are the base of the IK. The motion turns by ``turn`` rad
+    about z, and the shift puts the mean of the two roots together. Returns the
     base, the joints of ``joint_names``, and the median heading of the UMR base from the IK
     base after the turn, in degrees.
     """
@@ -138,8 +140,8 @@ def read_umr(
         round(float(data["fps"][0])),
         FPS,
     )
-    pos = Rotation.from_euler("z", UMR_TURN).apply(motion["base_pos"])
-    quat = quat_mul(np.array([np.cos(UMR_TURN / 2), 0.0, 0.0, np.sin(UMR_TURN / 2)]), motion["base_quat_wxyz"])
+    pos = Rotation.from_euler("z", turn).apply(motion["base_pos"])
+    quat = quat_mul(np.array([np.cos(turn / 2), 0.0, 0.0, np.sin(turn / 2)]), motion["base_quat_wxyz"])
     n = min(len(pos), len(ref_pos))
     pos[:, :2] += (ref_pos[:n, :2] - pos[:n, :2]).mean(axis=0)
     heading = np.degrees(np.angle(np.median(np.exp(1j * (_yaw(quat[:n]) - _yaw(ref_quat[:n]))))))
@@ -215,7 +217,7 @@ def _worker_measure(job: tuple[str, Path, str, Path, Path | None, Path | None]) 
     heading = None
     if umr is not None:
         base_pos, base_quat, joint_pos, heading = read_umr(
-            umr, _MODELS.joint_names, ik["goal_pos"][:, 0], ik["goal_quat"][:, 0]
+            umr, _MODELS.joint_names, ik["goal_pos"][:, 0], ik["goal_quat"][:, 0], UMR_TURNS[source]
         )
         motions["umr"] = (base_pos, base_quat, joint_pos)
     frames = min(len(mask), *(len(joints) for _, _, joints in motions.values()))
@@ -354,6 +356,8 @@ def compare(
         raise SystemExit(f"{len(missing)} of {len(names)} motions are not in {store}. Run `uv run retarget`.")
     jobs = [(source, path, name, store, reactor, None) for path, name in zip(paths, names, strict=True)]
     if umr is not None:
+        if source not in UMR_TURNS:
+            raise SystemExit(f"The world of a UMR motion of {source} is unknown. Add its turn to UMR_TURNS.")
         # UMR names a motion after its input file and its robot, and SMPL-X files keep the clip names.
         jobs = [(*job[:5], umr / f"{clip_key(clip_dir, job[1])}_{umr.name}.npz") for job in jobs]
         jobs = [job for job in jobs if job[5].exists()]

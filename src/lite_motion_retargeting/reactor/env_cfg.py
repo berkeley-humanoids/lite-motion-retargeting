@@ -114,8 +114,19 @@ def robot_cfg(joints: tuple[str, ...]) -> EntityCfg:
     )
 
 
-def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> ManagerBasedRlEnvCfg:
-    """Return the environment. Its terms and their weights follow table 1 of the paper."""
+#: The weight of the L1 norm of the root force, in N, and of the root torque, in N m, in
+#: table 1 of the paper. The paper calls it its most sensitive weight: a higher weight makes
+#: the motion more physical, but fails on more of the hard motions (its fig. 8).
+WRENCH_WEIGHT: float = 1e-2
+
+
+def env_cfg(
+    joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg, wrench_weight: float = WRENCH_WEIGHT
+) -> ManagerBasedRlEnvCfg:
+    """Return the environment. Its terms and their weights follow table 1 of the paper.
+
+    ``wrench_weight`` replaces :data:`WRENCH_WEIGHT`, to trade the wrench for failures.
+    """
     observations = {
         "goals": ObservationTermCfg(func=goal_features),
         "joint_target_error": ObservationTermCfg(func=joint_target_error),
@@ -161,8 +172,8 @@ def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> Ma
             "joint_acc": RewardTermCfg(func=joint_acc_l2, weight=-1e-6),
             "action_rate": RewardTermCfg(func=action_rate_l2, weight=-1e-2),
             "action_acc": RewardTermCfg(func=action_acc_l2, weight=-1e-2),
-            "wrench_force": RewardTermCfg(func=wrench_l1, weight=-1e-2, params={"part": "force"}),
-            "wrench_torque": RewardTermCfg(func=wrench_l1, weight=-1e-2, params={"part": "torque"}),
+            "wrench_force": RewardTermCfg(func=wrench_l1, weight=-wrench_weight, params={"part": "force"}),
+            "wrench_torque": RewardTermCfg(func=wrench_l1, weight=-wrench_weight, params={"part": "torque"}),
         },
         # In playback, export decides when an env resets.
         terminations={} if goals.playback else {

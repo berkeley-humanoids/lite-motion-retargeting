@@ -42,6 +42,10 @@ def download(source: str = "lafan1", include: list[str] | None = None, force: bo
     if source not in SOURCES:
         raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")
     spec = SOURCES[source]
+    local_path = CACHE_ROOT / source
+    if spec.repo_id is None and spec.zip_url is None:
+        raise SystemExit(f"{spec.title} has no public download. Copy its clips to {local_path / spec.clip_dir} "
+                         f"yourself, from {spec.page}.")
 
     snapshot_download(
         repo_id=G1_REPO_ID,
@@ -51,7 +55,6 @@ def download(source: str = "lafan1", include: list[str] | None = None, force: bo
         force_download=force,
         max_workers=DOWNLOAD_WORKERS,
     )
-    local_path = CACHE_ROOT / source
     if spec.zip_url is not None:
         archive = local_path / spec.zip_url.rsplit("/", 1)[1]
         if force or not archive.exists():

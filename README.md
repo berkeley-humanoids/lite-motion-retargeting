@@ -15,6 +15,7 @@ sign in with a Hugging Face account that can read the private repo.
 | Source | Clips | Rate | Size | License | On the Hub |
 |---|---|---|---|---|---|
 | `lafan1bvh`: [LAFAN1 BVH][lafan1bvh], human | 77 | 30 Hz | 0.35 GB | CC BY-NC-ND 4.0 | Private |
+| `amassx`: [AMASS SMPL-X][amassx], human | Your copy | 60 to 250 Hz | 0.3 GB for 4.2 h at 30 Hz | AMASS: non-commercial research, no redistribution | No |
 | `lafan1`: [LAFAN1][lafan1] | 40 | 30 Hz | 0.3 GB | CC BY-NC-ND 4.0 | No |
 | `amass`: [AMASS][amass], all subsets | 17,717 | 60 to 250 Hz | 7 GB | AMASS: non-commercial research, no redistribution | No |
 | `motiondecode`: [ChingMu MotionDecode][motiondecode] | 92,559 | 120 Hz | 148 GB | ChingMu: non-commercial research, not to be hosted as a competing dataset | No |
@@ -22,17 +23,25 @@ sign in with a Hugging Face account that can read the private repo.
 | `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | Yes |
 | `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | Yes |
 
-`src/lite_motion_retargeting/sources/` defines each source and its loader. The `amass`
-and `motiondecode` motions stay in your local store, `dataset/`, for training. `uv run
-publish` uploads `lafan1bvh` to a private repo, and the three Kimodo sets to a public one.
+`src/lite_motion_retargeting/sources/` defines each source and its loader. The `amassx`,
+`amass` and `motiondecode` motions stay in your local store, `dataset/`, for training.
+`uv run publish` uploads `lafan1bvh` to a private repo, and the three Kimodo sets to a
+public one.
 See [Publish to the Hub](#publish-to-the-hub).
 
 `lafan1bvh` is the human motion that the authors of `lafan1` retargeted: the BVH takes of
 Ubisoft's LAFAN1. These takes come as a zip on GitHub, not on the Hub. `lafan1` holds 40
 of them, with the same names and frames, so the two
-[retargeting paths](#how-a-clip-is-retargeted) compare clip for clip. The other sources
-ship G1 motion only. The raw AMASS takes need an MPI account, MotionDecode gives its BVH
-files on request, and Kimodo generated its clips on the G1 directly.
+[retargeting paths](#how-a-clip-is-retargeted) compare clip for clip.
+
+`amassx` is the human motion behind `amass`: the AMASS clips in their SMPL-X form. Its
+reader builds the body with the SMPL-X model of AMASS, which it reads from
+`.cache/smplx/SMPLX_NEUTRAL.npz`. Both need an MPI account, so `uv run download` cannot
+fetch them. Copy the clips to `.cache/amassx/smplx/` and the model to `.cache/smplx/`
+yourself. [UMR on AMASS](#umr-on-amass) prepares a sample of them.
+
+The other sources ship G1 motion only. MotionDecode gives its BVH files on request, and
+Kimodo generated its clips on the G1 directly.
 
 `kimodo` is not motion capture. NVIDIA's Kimodo model generated each clip from a text
 prompt, such as "a person throwing boxing punches". Then a tracking policy played the clip
@@ -443,6 +452,9 @@ own, outside this package. `umr/` holds the files that run it on Lite Pro:
 | `ground_smplx.py` | Puts the feet of each SMPL-X take on the floor, as the authors of UMR do. The conversion leaves the bodies 2 to 6 cm below the floor, and UMR does not move them. |
 | `batch.json` | The batch config of UMR, which solves each take in order. The default of UMR solves it in both directions and then picks, which makes joints jump. |
 | `manifest.py` | Writes `manifest.json` beside the motions of a run: the hash of the robot model, the commit of UMR, and the configs. |
+| `amass_model.py` | Makes the SMPL-X model of AMASS loadable by UMR. |
+| `prepare_amass.py` | Prepares AMASS SMPL-X clips for UMR and the IK: 30 Hz, 10 betas, and the standing feet on the floor. It skips the clips on stairs, beams or boxes. |
+| `amass_clips.txt` | The AMASS clips of [the comparison](#compare-the-methods): 4.2 h from 47 subjects of 8 subsets. |
 
 To retarget LAFAN1 with UMR, run these steps in an empty directory beside the clone of this
 repo, such as `../umr`:
@@ -474,7 +486,7 @@ repo, such as `../umr`:
 4. Copy Lite Pro and its config into UMR:
 
    ```bash
-   lmr=../Lite-Motion-Retargeting
+   lmr=$(realpath ../Lite-Motion-Retargeting)
    mjcf=$(cd $lmr && uv run python -c "from lite_description import get_mjcf_path; print(get_mjcf_path('lite_pro'))")
    robot=$(dirname "$(dirname "$mjcf")")
    mkdir -p UMR/assets/lite_pro && cp -r "$robot/mjcf" "$robot/meshes" UMR/assets/lite_pro/
@@ -515,12 +527,60 @@ Thus step 6 trains the correspondence again with `--force-build --force-train`. 
 these flags, a run after a change to Lite Pro uses the old correspondence.
 `uv run compare` stops if `manifest.json` names another model than the installed Lite Pro.
 
+### UMR on AMASS
+
+AMASS is SMPL-X motion already, so UMR and the IK read the same files. To retarget the
+clips of `amass_clips.txt`, do steps 1 to 4 of [UMR](#umr), then these steps:
+
+1. Download the SMPL-X N archives of ACCAD, CMU, EKUT, Eyes Japan, HDM05, KIT, SFU and
+   WEIZMANN, and the SMPL-X model with the locked head, from the [AMASS site][amassx].
+   Extract them into `amass/` and `amass_model/`.
+
+2. Make the model of AMASS loadable by UMR. UMR reads it through a robot config of its
+   own:
+
+   ```bash
+   .venv/bin/python $lmr/umr/amass_model.py amass_model/neutral/model.npz \
+       body_models/smplx/SMPLX_NEUTRAL.npz body_models/amass
+   .venv/bin/python -c "import json; c = json.load(open('UMR/robot_configs/lite_pro.json')); \
+       c['smplx_model_dir'] = '../../body_models/amass'; \
+       json.dump(c, open('UMR/robot_configs/lite_pro_amass.json', 'w'), indent=2)"
+   ```
+
+3. Prepare the clips into the cache of `amassx`, and give the IK the same model:
+
+   ```bash
+   .venv/bin/python $lmr/umr/prepare_amass.py body_models/amass/SMPLX_NEUTRAL.npz amass \
+       $lmr/.cache/amassx/smplx $lmr/umr/amass_clips.txt
+   mkdir -p $lmr/.cache/smplx && cp body_models/amass/SMPLX_NEUTRAL.npz $lmr/.cache/smplx/
+   ```
+
+4. Retarget the clips with UMR and with the IK:
+
+   ```bash
+   cd UMR && ../.venv/bin/python scripts/humanoid_retarget_pipeline_batch.py \
+       --config robot_configs/lite_pro_amass.json --batch-config lite_pro_batch.json \
+       --motion-folder $lmr/.cache/amassx/smplx --workers 9 --retarget-gpus 0 \
+       --output-root ../output/amass --force-build --force-train
+   ../.venv/bin/python $lmr/umr/manifest.py robot_configs/lite_pro_amass.json \
+       lite_pro_batch.json ../output/amass/lite_pro
+   cd $lmr && uv run retarget --source amassx --workers 40 --out dataset_amass
+   ```
+
+UMR trains a correspondence for each body, thus once for each of the 47 subjects.
+`prepare_amass.py` moves each clip up or down, so that the median height of a standing foot
+is `z = 0`. In most AMASS clips, a standing foot sinks 1 to 2 cm, and UMR anchors a foot to
+the floor only within 5 mm of it. The authors' rule for LAFAN1 does not apply, because it
+needs a T-pose at the ends of a take. UMR treats a folder named `motions` as its BONES-SEED
+dataset, so the clips of `amassx` go in `smplx/`.
+
 ## Compare the methods
 
 `uv run compare` measures the IK, UMR and ReActor on the same frames of one source:
 
 ```bash
 uv run compare --source lafan1bvh --umr ../umr/output/lite_pro --reactor dataset_reactor
+uv run compare --source amassx --store dataset_amass --umr ../umr/output/amass/lite_pro
 uv run compare --source kimodo --reactor dataset_reactor
 ```
 
@@ -538,9 +598,10 @@ measures every method in the same way:
 - **Fidelity to the source.** The limb direction error, the root error over 1 s and the
   contact IoU compare each method with its source. The IK aims at the limb directions of
   the source, so this metric favors the IK, as the slide where the source stands does.
-- **One world.** UMR uses a world turned 90° from that of the IK. `compare` turns it back
-  by that fixed angle, and shifts it by one offset per motion. UMR scales the human by its
-  height, not by the height of its pelvis, so `compare` leaves out the goal errors of UMR.
+- **One world.** For LAFAN1, UMR uses a world turned 90° from that of the IK, and for
+  AMASS the same world. `compare` turns a UMR motion by the fixed angle of its source, and
+  shifts it by one offset per motion. UMR scales the human by its height, not by the
+  height of its pelvis, so `compare` leaves out the goal errors of UMR.
 - **One model.** Every robot layer and every UMR run records the hash of its Lite Pro
   model. `compare` stops if a hash differs from that of the installed model.
 
@@ -572,6 +633,21 @@ planting. This table covers its 9,461 ReActor pieces, 627 of 630 min:
 | Fastest joint, p99 / max | 9.8 / 56.3 rad/s | **8.1** / **37.3** rad/s |
 | Goal error, feet / hands | **6.55** / 13.61 cm | 8.13 / **12.76** cm |
 
+AMASS is SMPL-X motion, so UMR reads it without a conversion. This table covers the 1,136
+clips of [UMR on AMASS](#umr-on-amass), 252 min. ReActor did not run on it.
+
+| Metric | IK | UMR |
+|---|---|---|
+| Slide where the source stands, mean / median / p95 | **1.4** / **0.59** / **5.3** cm/s | 7.6 / 3.8 / 27.5 cm/s |
+| Slide where the sole is within 1 cm of the floor, mean / median | **15.8** / **0.70** cm/s | 24.6 / 5.5 cm/s |
+| Contact IoU with the source | 79.7% | **80.3%** |
+| Gap where the source stands | 0.39 cm | **0.14 cm** |
+| Penetration, p95 of frames | 0.58 cm | **0.10 cm** |
+| Fastest joint, p99 / max | 10.5 / 20.0 rad/s | **7.4** / **11.7** rad/s |
+| Limb direction error | **3.7°** | 12.0° |
+| Root error over 1 s | 4.3 cm | **1.9 cm** |
+| Goal error, feet / hands | 0.26 / 0.84 cm | |
+
 No method is best on every metric:
 
 - **The IK** keeps a foot still where the source stands, and copies the limbs of the
@@ -585,10 +661,11 @@ No method is best on every metric:
   the source, and it needs the wrench. The motions on the ground are its worst: their feet
   slide 11.6 cm/s where the source stands.
 - **UMR** sinks the least, and moves its joints the slowest. But where the source stands,
-  its feet slide 5 times as fast as those of the IK, and its limbs turn 20° from the
-  source. UMR scales the human by 0.77 and the IK by 0.84, so a UMR root travels about 8%
-  less, which adds to its root error. [Why UMR slides](#why-umr-slides) shows that the slide
-  comes from its input.
+  its feet slide 5 times as fast as those of the IK on LAFAN1, and its limbs turn 20° from
+  the source. On LAFAN1, UMR scales the human by 0.77 and the IK by 0.84, so a UMR root
+  travels about 8% less, which adds to its root error. On AMASS, its root follows the
+  source more closely than that of the IK. [Why UMR slides](#why-umr-slides) shows that
+  part of its slide comes from its input, and the rest comes from UMR.
 
 These metrics measure the motions, not the tracking policy that trains on them.
 
@@ -596,8 +673,8 @@ The three methods also differ in cost, on the 276 min of LAFAN1:
 
 | Method | Runs on | Time |
 |---|---|---|
-| IK | CPU | 2.3 h on one core, or 5.4 min with 40 workers |
-| UMR | GPU | 33 min on one RTX 3080 Ti, with 9 workers |
+| IK | CPU | 2.3 h on one core, or 5.4 min with 40 workers. On the 252 min of AMASS, 4.8 min with 40 workers |
+| UMR | GPU | 33 min on one RTX 3080 Ti, with 9 workers. On the 252 min of AMASS, 34 min on an RTX 3090 and an RTX 3080 Ti with 18 workers, with the 47 correspondences |
 | ReActor | GPU | 6.7 h of training on one RTX 3090 for 20,000 iterations, then 6 min of export |
 
 ### Why UMR slides
@@ -632,7 +709,12 @@ on them, in the mean.
   anchors are active in 97% of the frames of `walk1_subject1`, but they do not stop the
   slide.
 
-A fair test of UMR needs SMPL-X motion whose feet do not slide, such as AMASS.
+**On AMASS, the input does not slide, and UMR still does.** Where the human stands, the
+lowest foot vertex of the AMASS clips slides 2.1 cm/s, as the LAFAN1 BVH does. UMR then
+slides 7.6 cm/s, less than the 12.4 cm/s of LAFAN1, but 3.6 times its input and 5.6
+times the IK. It slides more than the IK on all 1,136 clips, by a factor of 4 to 10 in
+each of the 8 subsets. Thus on LAFAN1, part of the slide of UMR comes from its input, and
+the rest comes from UMR itself.
 
 ## The file format
 
@@ -664,6 +746,7 @@ can train on these motions.
 [lafan1]: https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset
 [lafan1bvh]: https://github.com/ubisoft/ubisoft-laforge-animation-dataset
 [amass]: https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics
+[amassx]: https://amass.is.tue.mpg.de
 [motiondecode]: https://huggingface.co/datasets/CMRobot/MotionDecode
 [kimodo]: https://huggingface.co/datasets/cagataydev/kimodo-g1-motion-v1
 [kimodolh2]: https://huggingface.co/datasets/cagataydev/kimodo-g1-longhorizon-v2

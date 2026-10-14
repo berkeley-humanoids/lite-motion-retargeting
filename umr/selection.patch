@@ -1,0 +1,323 @@
+Fix two bugs in how UMR (d1cdaed) picks between its forward and backward solves.
+
+Apply in the clone of UMR with `git apply selection.patch`. Two solver keys of the batch
+config switch the fixes, and each default keeps the behavior of UMR:
+
+  trajectory_warm_start_bidirectional_continuity_space: "joints" (UMR) or "qpos".
+      "qpos" also charges a jump of the root between the two solves: the whole
+      configuration by mj_differentiatePos, root in m and rad, joints in rad, weight 1.
+  frame_cost_at_solution: false (UMR) or true.
+      UMR compares each frame by its residual before the last solver step, which with
+      one step per frame is the residual of the start pose. true adds one residual pass
+      at the returned pose, without a step, and compares that.
+
+warm_start_debug_dir saves both solves, both costs, and the pick of each frame.
+
+The sequential solve of umr/batch.json is bit-identical with or without the patch.
+See "Why UMR slides" in the README for what the fixes change.
+
+diff --git a/scripts/humanoid_retarget_pipeline.py b/scripts/humanoid_retarget_pipeline.py
+index e567e89..cd29652 100644
+--- a/scripts/humanoid_retarget_pipeline.py
++++ b/scripts/humanoid_retarget_pipeline.py
+@@ -121,6 +121,8 @@ RETARGET_SOLVER_ARGS = (
+     "trajectory_warm_start_mode",
+     "trajectory_warm_start_bidirectional_continuity_cost",
+     "trajectory_warm_start_bidirectional_switch_cost",
++    "trajectory_warm_start_bidirectional_continuity_space",
++    "frame_cost_at_solution",
+ )
+ 
+ 
+diff --git a/scripts/retarget_smpl_to_humanoid_surface_vector.py b/scripts/retarget_smpl_to_humanoid_surface_vector.py
+index eb53a37..7b2c670 100644
+--- a/scripts/retarget_smpl_to_humanoid_surface_vector.py
++++ b/scripts/retarget_smpl_to_humanoid_surface_vector.py
+@@ -226,6 +226,15 @@ def parse_args():
+     )
+     parser.add_argument("--trajectory-warm-start-bidirectional-continuity-cost", type=float, default=None)
+     parser.add_argument("--trajectory-warm-start-bidirectional-switch-cost", type=float, default=None)
++    parser.add_argument(
++        "--trajectory-warm-start-bidirectional-continuity-space",
++        choices=("joints", "qpos"),
++        default=None,
++        help="joints: the hinge joints only. qpos: the whole configuration, root included, by mj_differentiatePos.",
++    )
++    parser.add_argument("--frame-cost-at-solution", action="store_true", default=None)
++    parser.add_argument("--no-frame-cost-at-solution", dest="frame_cost_at_solution", action="store_false")
++    parser.add_argument("--warm-start-debug-dir", type=str, default=None)
+     parser.add_argument("--damping", type=float, default=None)
+     parser.add_argument("--collision-threshold", type=float, default=None)
+     parser.add_argument("--robot-self-penetration-cost", type=float, default=None)
+@@ -431,6 +440,13 @@ def fill_args_from_config(args):
+         "trajectory_warm_start_bidirectional_switch_cost",
+         solver.get("trajectory_warm_start_bidirectional_switch_cost", 0.01),
+     )
++    set_default(
++        args,
++        "trajectory_warm_start_bidirectional_continuity_space",
++        solver.get("trajectory_warm_start_bidirectional_continuity_space", "joints"),
++    )
++    set_default(args, "frame_cost_at_solution", bool_config(solver.get("frame_cost_at_solution"), False))
++    set_default(args, "warm_start_debug_dir", solver.get("warm_start_debug_dir", ""))
+     set_default(args, "damping", solver.get("damping", 1e-4))
+     set_default(args, "collision_threshold", solver.get("collision_threshold", 0.1))
+     set_default(args, "robot_self_penetration_cost", solver.get("robot_self_penetration_cost", 0.0))
+@@ -1632,6 +1648,7 @@ def solve_frame_body_segment_qp(
+     ground_penetration_collision_cache=None,
+     robot_object_penetration_cache=None,
+     ground_contact_anchor_state=None,
++    cost_out=None,
+ ):
+     qpos = qpos_init.copy()
+     costs = []
+@@ -1761,7 +1778,14 @@ def solve_frame_body_segment_qp(
+         smooth_jac[np.arange(len(joint_dof_addrs)), joint_dof_addrs] = 1.0
+ 
+     frame_iters = int(args.iters) if iters is None else int(iters)
+-    for _iter in range(max(1, frame_iters)):
++    # Each pass records the residual of the pose before its step. With frame_cost_at_solution,
++    # one more pass without a step gives the cost of the pose that this function returns.
++    # That pass reads the anchor state and the caches, but does not change them.
++    cost_at_solution = bool(getattr(args, "frame_cost_at_solution", False))
++    solve_passes = max(1, frame_iters)
++    total_passes = solve_passes + (1 if cost_at_solution or cost_out is not None else 0)
++    solution_cost = None
++    for _iter in range(total_passes):
+         common.set_qpos(model, data, qpos)
+         rows = []
+         residuals = []
+@@ -1976,6 +2000,9 @@ def solve_frame_body_segment_qp(
+ 
+         J = np.concatenate(rows, axis=0)
+         r = np.concatenate(residuals, axis=0)
++        if _iter == solve_passes:
++            solution_cost = float(np.mean(r * r))
++            break
+         use_step_box, use_step_l2 = common.step_limit_flags(args.step_limit_mode, label="step_limit_mode")
+         use_root_step_box, use_root_step_l2 = common.step_limit_flags(
+             args.root_step_limit_mode,
+@@ -2114,7 +2141,11 @@ def solve_frame_body_segment_qp(
+         qpos = common.clamp_joint_ranges(model, qpos, joint_limits_by_qpos=joint_limits_by_qpos)
+         costs.append(float(np.mean(r * r)))
+     common.set_qpos(model, data, qpos)
+-    return qpos, costs[-1] if costs else 0.0
++    step_cost = costs[-1] if costs else 0.0
++    if cost_out is not None:
++        cost_out["step"] = step_cost
++        cost_out["solution"] = solution_cost
++    return qpos, solution_cost if cost_at_solution else step_cost
+ 
+ 
+ def main():
+@@ -2769,11 +2800,22 @@ def main():
+         parent = np.zeros((n_frames, 2), dtype=np.int8)
+         dp[0] = frame_costs[0]
+         joint_addrs = np.asarray(joint_qpos_addrs, dtype=np.int32)
++        # "joints" compares the hinge joints only, so a jump of the root between the two
++        # passes costs nothing. "qpos" compares the whole configuration in the tangent space:
++        # root translation in m, root rotation in rad, joints in rad, all with weight 1.
++        whole_qpos = str(args.trajectory_warm_start_bidirectional_continuity_space) == "qpos"
++        dq_full = np.zeros(model.nv, dtype=np.float64)
+         for frame_idx in range(1, n_frames):
+             for state in range(2):
+                 transition_scores = np.empty(2, dtype=np.float64)
+                 for prev_state in range(2):
+-                    dq = q_candidates[frame_idx, state, joint_addrs] - q_candidates[frame_idx - 1, prev_state, joint_addrs]
++                    if whole_qpos:
++                        mujoco.mj_differentiatePos(
++                            model, dq_full, 1.0, q_candidates[frame_idx - 1, prev_state], q_candidates[frame_idx, state]
++                        )
++                        dq = dq_full
++                    else:
++                        dq = q_candidates[frame_idx, state, joint_addrs] - q_candidates[frame_idx - 1, prev_state, joint_addrs]
+                     transition = continuity_cost * float(np.dot(dq, dq))
+                     if state != prev_state:
+                         transition += switch_cost
+diff --git a/scripts/retarget_smpl_to_humanoid_surface_vector_batch.py b/scripts/retarget_smpl_to_humanoid_surface_vector_batch.py
+index 610ace3..aaca5f2 100644
+--- a/scripts/retarget_smpl_to_humanoid_surface_vector_batch.py
++++ b/scripts/retarget_smpl_to_humanoid_surface_vector_batch.py
+@@ -217,6 +217,15 @@ def parse_args(argv=None):
+     )
+     parser.add_argument("--trajectory-warm-start-bidirectional-continuity-cost", type=float, default=None)
+     parser.add_argument("--trajectory-warm-start-bidirectional-switch-cost", type=float, default=None)
++    parser.add_argument(
++        "--trajectory-warm-start-bidirectional-continuity-space",
++        choices=("joints", "qpos"),
++        default=None,
++        help="joints: the hinge joints only. qpos: the whole configuration, root included, by mj_differentiatePos.",
++    )
++    parser.add_argument("--frame-cost-at-solution", action="store_true", default=None)
++    parser.add_argument("--no-frame-cost-at-solution", dest="frame_cost_at_solution", action="store_false")
++    parser.add_argument("--warm-start-debug-dir", type=str, default=None)
+     parser.add_argument("--damping", type=float, default=None)
+     parser.add_argument("--collision-threshold", type=float, default=None)
+     parser.add_argument("--robot-self-penetration-cost", type=float, default=None)
+@@ -439,6 +448,13 @@ def fill_args_from_config(args):
+         "trajectory_warm_start_bidirectional_switch_cost",
+         solver.get("trajectory_warm_start_bidirectional_switch_cost", 0.01),
+     )
++    set_default(
++        args,
++        "trajectory_warm_start_bidirectional_continuity_space",
++        solver.get("trajectory_warm_start_bidirectional_continuity_space", "joints"),
++    )
++    set_default(args, "frame_cost_at_solution", bool_config(solver.get("frame_cost_at_solution"), False))
++    set_default(args, "warm_start_debug_dir", solver.get("warm_start_debug_dir", ""))
+     set_default(args, "damping", solver.get("damping", 1e-4))
+     set_default(args, "collision_threshold", solver.get("collision_threshold", 0.1))
+     set_default(args, "robot_self_penetration_cost", solver.get("robot_self_penetration_cost", 0.0))
+@@ -1002,6 +1018,7 @@ def solve_frame_body_segment_qp(
+     ground_penetration_collision_cache=None,
+     robot_object_penetration_cache=None,
+     ground_contact_anchor_state=None,
++    cost_out=None,
+ ):
+     qpos = qpos_init.copy()
+     costs = []
+@@ -1131,7 +1148,14 @@ def solve_frame_body_segment_qp(
+         smooth_jac[np.arange(len(joint_dof_addrs)), joint_dof_addrs] = 1.0
+ 
+     frame_iters = int(args.iters) if iters is None else int(iters)
+-    for _iter in range(max(1, frame_iters)):
++    # Each pass records the residual of the pose before its step. With frame_cost_at_solution,
++    # one more pass without a step gives the cost of the pose that this function returns.
++    # That pass reads the anchor state and the caches, but does not change them.
++    cost_at_solution = bool(getattr(args, "frame_cost_at_solution", False))
++    solve_passes = max(1, frame_iters)
++    total_passes = solve_passes + (1 if cost_at_solution or cost_out is not None else 0)
++    solution_cost = None
++    for _iter in range(total_passes):
+         common.set_qpos(model, data, qpos)
+         rows = []
+         residuals = []
+@@ -1346,6 +1370,9 @@ def solve_frame_body_segment_qp(
+ 
+         J = np.concatenate(rows, axis=0)
+         r = np.concatenate(residuals, axis=0)
++        if _iter == solve_passes:
++            solution_cost = float(np.mean(r * r))
++            break
+         use_step_box, use_step_l2 = common.step_limit_flags(args.step_limit_mode, label="step_limit_mode")
+         use_root_step_box, use_root_step_l2 = common.step_limit_flags(
+             args.root_step_limit_mode,
+@@ -1484,7 +1511,11 @@ def solve_frame_body_segment_qp(
+         qpos = common.clamp_joint_ranges(model, qpos, joint_limits_by_qpos=joint_limits_by_qpos)
+         costs.append(float(np.mean(r * r)))
+     common.set_qpos(model, data, qpos)
+-    return qpos, costs[-1] if costs else 0.0
++    step_cost = costs[-1] if costs else 0.0
++    if cost_out is not None:
++        cost_out["step"] = step_cost
++        cost_out["solution"] = solution_cost
++    return qpos, solution_cost if cost_at_solution else step_cost
+ 
+ 
+ def estimate_ground_z_stream(sequence, frame_ids, args, source_joint_names=None, soma_usd_path=None, source_model_type="smplx"):
+@@ -2168,11 +2199,22 @@ def main(argv=None):
+         parent = np.zeros((n_frames, 2), dtype=np.int8)
+         dp[0] = frame_costs[0]
+         joint_addrs = np.asarray(joint_qpos_addrs, dtype=np.int32)
++        # "joints" compares the hinge joints only, so a jump of the root between the two
++        # passes costs nothing. "qpos" compares the whole configuration in the tangent space:
++        # root translation in m, root rotation in rad, joints in rad, all with weight 1.
++        whole_qpos = str(args.trajectory_warm_start_bidirectional_continuity_space) == "qpos"
++        dq_full = np.zeros(model.nv, dtype=np.float64)
+         for frame_idx in range(1, n_frames):
+             for state in range(2):
+                 transition_scores = np.empty(2, dtype=np.float64)
+                 for prev_state in range(2):
+-                    dq = q_candidates[frame_idx, state, joint_addrs] - q_candidates[frame_idx - 1, prev_state, joint_addrs]
++                    if whole_qpos:
++                        mujoco.mj_differentiatePos(
++                            model, dq_full, 1.0, q_candidates[frame_idx - 1, prev_state], q_candidates[frame_idx, state]
++                        )
++                        dq = dq_full
++                    else:
++                        dq = q_candidates[frame_idx, state, joint_addrs] - q_candidates[frame_idx - 1, prev_state, joint_addrs]
+                     transition = continuity_cost * float(np.dot(dq, dq))
+                     if state != prev_state:
+                         transition += switch_cost
+@@ -2186,6 +2228,10 @@ def main(argv=None):
+             states[frame_idx - 1] = parent[frame_idx, states[frame_idx]]
+         return states.astype(bool), dp
+ 
++    warm_start_debug_dir = str(args.warm_start_debug_dir or "")
++    # The cost before the last step and the cost at the solution, per pass, for the debug record.
++    pass_costs = {}
++
+     def solve_stream_sequence(reverse: bool, desc: str, collect_debug: bool, progress):
+         nonlocal progress_done
+         nonlocal object_contact_template
+@@ -2193,6 +2239,9 @@ def main(argv=None):
+         nonlocal robot_object_penetration_cache
+         q_seq = np.empty((len(frame_ids), model.nq), dtype=np.float32)
+         seq_costs = np.empty(len(frame_ids), dtype=np.float32)
++        step_costs = np.full(len(frame_ids), np.nan, dtype=np.float32)
++        solution_costs = np.full(len(frame_ids), np.nan, dtype=np.float32)
++        pass_costs["backward" if reverse else "forward"] = (step_costs, solution_costs)
+         q_prev2 = None
+         q_prev = None
+         ground_contact_anchor_state = {}
+@@ -2361,6 +2410,7 @@ def main(argv=None):
+                         "object_position": object_contact_source["motion_positions"][local_idx],
+                         "object_quat_wxyz": object_contact_source["motion_quats_wxyz"][local_idx],
+                     }
++                frame_cost = {} if warm_start_debug_dir else None
+                 q_opt, cost = solve_frame_body_segment_qp(
+                     model,
+                     data_mj,
+@@ -2388,9 +2438,13 @@ def main(argv=None):
+                     ground_penetration_collision_cache=ground_penetration_collision_cache,
+                     robot_object_penetration_cache=robot_object_penetration_cache,
+                     ground_contact_anchor_state=ground_contact_anchor_state,
++                    cost_out=frame_cost,
+                 )
+                 q_seq[out_idx] = q_opt.astype(np.float32)
+                 seq_costs[out_idx] = float(cost)
++                if frame_cost is not None:
++                    step_costs[out_idx] = frame_cost["step"]
++                    solution_costs[out_idx] = frame_cost["solution"]
+                 q_prev2 = q_prev
+                 q_prev = q_opt
+                 progress_done += 1
+@@ -2442,6 +2496,7 @@ def main(argv=None):
+         else:
+             qpos_seq = forward_qpos_seq
+             costs = forward_costs
++    selected_qpos_seq = qpos_seq.copy() if warm_start_debug_dir else None
+ 
+     unfiltered_qpos_seq = np.zeros((0, 0), dtype=np.float32)
+     if str(args.trajectory_filter_mode).lower() == "lqr":
+@@ -2510,6 +2565,30 @@ def main(argv=None):
+         "zero_source_finger_pose": np.asarray([bool(args.zero_source_finger_pose)]),
+     }
+     np.savez_compressed(args.out, **output_payload)
++    if warm_start_debug_dir:
++        debug_path = Path(warm_start_debug_dir) / Path(args.out).name
++        debug_path.parent.mkdir(parents=True, exist_ok=True)
++        empty = np.zeros(0, dtype=np.float32)
++        forward_step, forward_solution = pass_costs["forward"]
++        backward_step, backward_solution = pass_costs.get("backward", (empty, empty))
++        np.savez_compressed(
++            debug_path,
++            mode=np.asarray(trajectory_warm_start_mode),
++            continuity_space=np.asarray(str(args.trajectory_warm_start_bidirectional_continuity_space)),
++            frame_cost_at_solution=np.asarray(bool(args.frame_cost_at_solution)),
++            continuity_cost=np.asarray(float(args.trajectory_warm_start_bidirectional_continuity_cost)),
++            switch_cost=np.asarray(float(args.trajectory_warm_start_bidirectional_switch_cost)),
++            fps=np.asarray([fps], dtype=np.float32),
++            forward_qpos=forward_qpos_seq,
++            backward_qpos=backward_qpos_seq,
++            forward_cost_step=forward_step,
++            forward_cost_solution=forward_solution,
++            backward_cost_step=backward_step,
++            backward_cost_solution=backward_solution,
++            pick_backward=bidirectional_pick_backward_mask,
++            selected_qpos=selected_qpos_seq,
++            qpos=qpos_seq,
++        )
+     print(
+         f"[HumanoidRetarget] saved {args.out} qpos={qpos_seq.shape} "
+         f"cost mean={float(costs.mean()):.6f} max={float(costs.max()):.6f}"

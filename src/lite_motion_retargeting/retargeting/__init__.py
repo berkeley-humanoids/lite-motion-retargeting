@@ -283,6 +283,7 @@ def retarget_clip(
     do_ik: bool,
     ik_iters: int,
     show_progress: bool = True,
+    plant_feet: bool = True,
 ) -> Clip:
     """Run every step on one clip of ``source``, and pose the bodies that each layer holds.
 
@@ -290,10 +291,14 @@ def retarget_clip(
     convention. The robot layer holds the goal of each link in the convention of that link,
     so the goal compares directly against the link. The goal of the root is where the
     retarget put the base, so the robot and its goals share one root.
+
+    If ``plant_feet`` is False, a human clip skips :func:`human.plant`: the IK then reaches
+    the goals as the source gives them, as a start for a method that fixes the feet itself,
+    such as ReActor.
     """
     loaded = SOURCES[source].load(path)
     if isinstance(loaded, HumanClip):
-        return _retarget_human(models, loaded, ik_iters)
+        return _retarget_human(models, loaded, ik_iters, plant_feet)
 
     clip, source_fps = loaded
     source_pos, source_quat = world_poses(
@@ -349,12 +354,13 @@ def human_planted(pos: np.ndarray) -> np.ndarray:
     return planted(pos[:, points], FPS)
 
 
-def _retarget_human(models: Models, clip: HumanClip, ik_iters: int) -> Clip:
+def _retarget_human(models: Models, clip: HumanClip, ik_iters: int, plant_feet: bool) -> Clip:
     """Retarget one human clip: goals from ``human.py``, then the floating-base IK."""
     pos, quat = resample_poses(clip.pos, clip.quat, clip.fps, FPS)
     feet_planted = human_planted(pos)
     goal_pos, goal_quat = goals(pos, quat, calibrate(models.lite, clip.rest))
-    goal_pos = plant(goal_pos, goal_quat, feet_planted, sole(models.lite, FEET))
+    if plant_feet:
+        goal_pos = plant(goal_pos, goal_quat, feet_planted, sole(models.lite, FEET))
     base_pos, base_quat, joint_pos = solve_ik(
         models.floating, models.joint_names, goal_pos, goal_quat, ik_iters
     )
@@ -363,6 +369,7 @@ def _retarget_human(models: Models, clip: HumanClip, ik_iters: int) -> Clip:
 
     # The planted goals stand on the floor, and the IK leaves the soles within a few
     # millimetres of them. Thus the shift is small, and it moves the goals with the robot.
+    # Goals that are not planted can float or sink, and the shift grounds the median frame.
     shift = ground_height(models, joint_pos, base_pos, base_quat)
     base_pos[:, 2] += shift
     goal_pos[:, :, 2] += shift

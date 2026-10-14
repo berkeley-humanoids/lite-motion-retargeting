@@ -451,6 +451,7 @@ own, outside this package. `umr/` holds the files that run it on Lite Pro:
 | `lafan1_to_smplx.py` | Converts LAFAN1 BVH takes to SMPL-X with [`lafan_to_smplx`](https://github.com/jaraujo98/lafan_to_smplx), with the 10 betas of the body that UMR builds. |
 | `ground_smplx.py` | Puts the feet of each SMPL-X take on the floor, as the authors of UMR do. The conversion leaves the bodies 2 to 6 cm below the floor, and UMR does not move them. |
 | `batch.json` | The batch config of UMR, which solves each take in order. The default of UMR solves it in both directions and then picks, which makes joints jump. |
+| `selection.patch` | Fixes two bugs in how UMR picks between the two directions. The solve in order does not need it. |
 | `manifest.py` | Writes `manifest.json` beside the motions of a run: the hash of the robot model, the commit of UMR, and the configs. |
 | `amass_model.py` | Makes the SMPL-X model of AMASS loadable by UMR. |
 | `prepare_amass.py` | Prepares AMASS SMPL-X clips for UMR and the IK: 30 Hz, 10 betas, and the standing feet on the floor. It skips the clips on stairs, beams or boxes. |
@@ -697,8 +698,7 @@ on them, in the mean.
 - **The input matches that of the authors.** `lafan1_to_smplx.py` gives the poses of the
   `dance1_subject2` file that UMR ships, and `ground_smplx.py` its height, to 1 mm.
 - **No change to the input or the solver brings the slide near that of the IK.** Solving in
-  order keeps the slide and stops the joint jumps, because the bidirectional selection of
-  UMR ignores the root. [UMR](#umr) now runs this way.
+  order keeps the slide and stops the joint jumps. [UMR](#umr) now runs this way.
 - **A stronger ground anchor makes the slide worse.** The anchor holds a point of the foot
   while the source foot slides, then lets go.
 - **UMR slides as much on the G1, the robot of the UMR paper.** On the same 8 takes at
@@ -708,6 +708,29 @@ on them, in the mean.
   7.0 cm/s, and those of the BVH 2.1 cm/s. UMR follows the surface of its input. Its ground
   anchors are active in 97% of the frames of `walk1_subject1`, but they do not stop the
   slide.
+
+**Picking between the two directions makes the joints jump, even after a fix.** By
+default, UMR solves a take forward and backward, then picks a solve for each frame.
+`selection.patch` fixes two bugs in that pick:
+
+- **The cost before the step.** UMR compares each frame by its residual before the last
+  solver step, thus by its start pose. At the solution, the other direction is cheaper on
+  20% of the frames. This fix changes the pick on 18% of the frames of the 8 takes, and
+  lowers the fastest joint from 27.8 to 9.2 rad/s.
+- **The root.** The cost of a switch between the two solves counts the joints, not the
+  root. The two solves rarely differ at the root, by 0.2 to 0.8 cm in the median take, so
+  this fix changes the pick on only 0.7% of the frames.
+
+On all of LAFAN1, the fixed pick still switches 2,303 times, and joints jump at some
+switches. In `aiming2_subject3`, the two solves hold the right arm in two ways, 2.33 rad
+apart, and the switch costs less than what the cheaper solve saves over 50 frames:
+
+| UMR on LAFAN1 | Slide where the source stands, mean | Slide where the sole is near the floor, mean | Fastest joint, p99 / max | Time |
+|---|---|---|---|---|
+| In order | 12.4 cm/s | **37.0 cm/s** | **8.4** / **11.4** rad/s | **1×** |
+| Both directions, both fixes | **12.0 cm/s** | 38.5 cm/s | 8.7 / 47.7 rad/s | About 2× |
+
+Thus [UMR](#umr) keeps solving in order.
 
 **On AMASS, the input does not slide, and UMR still does.** Where the human stands, the
 lowest foot vertex of the AMASS clips slides 2.1 cm/s, as the LAFAN1 BVH does. UMR then

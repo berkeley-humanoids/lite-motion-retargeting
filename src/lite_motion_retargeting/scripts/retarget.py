@@ -69,7 +69,7 @@ def _worker_init() -> None:
 
 
 def _worker_retarget(
-    job: tuple[str, Path, str, bool, int, Path, bool, Path],
+    job: tuple[str, Path, str, bool, int, Path, bool, Path, bool],
 ) -> tuple[list[Path], dict[str, float], str | None]:
     """Retarget one clip in a worker, write its layers, and return their paths and metrics.
 
@@ -79,9 +79,9 @@ def _worker_retarget(
     file among thousands does not stop the rest.
     """
     assert _MODELS is not None
-    source, path, name, ik, ik_iters, urdf, geometry, out = job
+    source, path, name, ik, ik_iters, urdf, geometry, out, plant_feet = job
     try:
-        clip = retarget_clip(_MODELS, source, path, ik, ik_iters, show_progress=False)
+        clip = retarget_clip(_MODELS, source, path, ik, ik_iters, show_progress=False, plant_feet=plant_feet)
         written = write_motion(_MODELS, name, clip, urdf, geometry, out)
     except Exception as error:  # noqa: BLE001 -- the parent lists every failed clip
         return [], {}, f"{path}: {type(error).__name__}: {error}"
@@ -104,6 +104,7 @@ def retarget(
     workers: int = 1,
     validate_only: bool = False,
     out: Path = DATASET_ROOT,
+    plant_feet: bool = True,
 ) -> None:
     """Retarget the clips of a source to Lite, and write the two layers of each motion.
 
@@ -120,6 +121,8 @@ def retarget(
             nothing.
         out: The store to write. Use another directory to keep two runs apart and compare
             them.
+        plant_feet: Plant the feet of a human source. ``--no-plant-feet`` writes the goals
+            as the source gives them, and the IK that reaches them, for ReActor to start from.
     """
     if source not in SOURCES:
         raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")
@@ -150,7 +153,7 @@ def retarget(
     print(f"  {len(paths)} clips of {source}, resampled to {FPS} Hz")
 
     if validate_only:
-        result = retarget_clip(models, source, paths[0], ik, ik_iters)
+        result = retarget_clip(models, source, paths[0], ik, ik_iters, plant_feet=plant_feet)
         print(f"\nClip: {paths[0].name} ({result.joint_pos.shape[0]} frames at {FPS} Hz, "
               f"from {result.source_fps} Hz)")
         print_metrics([result.metrics])
@@ -169,7 +172,7 @@ def retarget(
     metrics = []
     if workers > 1:
         jobs = [
-            (source, path, name, ik, ik_iters, urdf, geometry, out)
+            (source, path, name, ik, ik_iters, urdf, geometry, out, plant_feet)
             for path, name in zip(paths, names, strict=True)
         ]
         # Spawn, not fork: the parent runs threads by now, and a forked child can inherit a
@@ -192,7 +195,7 @@ def retarget(
     else:
         for path, name in tqdm(zip(paths, names, strict=True), total=len(names), desc="Clips",
                                unit="clip"):
-            result = retarget_clip(models, source, path, ik, ik_iters)
+            result = retarget_clip(models, source, path, ik, ik_iters, plant_feet=plant_feet)
             written += write_motion(models, name, result, urdf, geometry, out)
             metrics.append(result.metrics)
 

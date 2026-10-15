@@ -422,6 +422,47 @@ The 20k run trains for the 20,000 iterations of the paper. The paper names the w
 penalty its most sensitive setting. The real test is downstream: a tracking policy without
 the wrench, trained on these motions.
 
+### Two studies on LAFAN1
+
+Each run of these studies trains on the 77 LAFAN1 takes for 20,000 iterations, as the All,
+20k run does, and changes one setting. Two runs with the same settings differ by about 0.1
+cm/s of slide and 40 losses of track, so a smaller difference is noise.
+
+**A higher wrench penalty makes the feet slide more.** `train --wrench-weight` sets the
+weight of the force and the torque. The paper uses 0.01. Each run took about 9 h on an RTX
+A4500:
+
+| Wrench weight | Lost track | Played whole | Kept | Wrench, mean / mean peak | Slide where the source stands, mean / median | The same, on the 5 takes that every run played whole |
+|---|---|---|---|---|---|---|
+| 0.01, the All, 20k run | **104 times** | **48** | **99%** | 38 / 340 N | **5.2** / **1.4** cm/s | **2.8 cm/s** |
+| 0.01, again | 145 times | 45 | 99% | 38 / 320 N | 5.3 / 1.4 cm/s | 3.1 cm/s |
+| 0.03 | 2,374 times | 9 | 89% | 0.1 / 4 N | 13.8 / 2.1 cm/s | 9.6 cm/s |
+| 0.1 | 2,537 times | 8 | 88% | 0.0 / 2 N | 14.4 / 2.2 cm/s | 10.5 cm/s |
+| 0.3 | 2,777 times | 6 | 86% | **0.0** / **1** N | 16.3 / 2.5 cm/s | 11.8 cm/s |
+
+- **At 3 times the weight of the paper, the policy stops using the wrench.** No run uses
+  only a part of it.
+- **Without the wrench, Lite Pro keeps its balance with its feet.** Its feet slide 2.6 to
+  3.1 times as fast where the source stands, also on the takes that the policy plays whole.
+  The policy loses track 16 times as often, and its gap, penetration and root error grow.
+- The wrench thus holds the feet still, because it holds the body up.
+
+**The goals of the source do no better than the planted goals.** `uv run retarget
+--no-plant-feet` writes the goals as the source gives them, and the IK that reaches them,
+for ReActor to start from. ReActor cannot start from the planted IK and track the goals of
+the source: on a long take, the shifts of `plant()` add up, and the planted root ends far
+from the root of the source. The run took 6.7 h on an RTX 3090:
+
+| Goals | Lost track | Played whole | Slide where the source stands, mean / median | The same, on the 35 takes that the 3 runs played whole | Limb direction error | Root error over 1 s |
+|---|---|---|---|---|---|---|
+| Planted, the All, 20k run | **104 times** | **48** | **5.2** / **1.4** cm/s | **4.0 cm/s** | 9.1° | 6.6 cm |
+| Planted, the 0.01 run above | 145 times | 45 | 5.3 / 1.4 cm/s | 4.1 cm/s | 9.2° | 6.9 cm |
+| Of the source | 138 times | 39 | 5.4 / 1.5 cm/s | 4.3 cm/s | **8.8°** | **6.1 cm** |
+
+The goals of the source keep the limbs and the root a little closer to the source. On the
+feet, the difference is within the noise of a run. Thus the planting does not limit
+ReActor, and the planted goals stay the default.
+
 This implementation differs from the paper in four places. The paper has no public code to
 compare against. The unofficial reproduction has no license, so this repo uses none of its
 code.

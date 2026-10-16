@@ -16,6 +16,7 @@ sign in with a Hugging Face account that can read the private repo.
 |---|---|---|---|---|---|
 | `lafan1bvh`: [LAFAN1 BVH][lafan1bvh], human | 77 | 30 Hz | 0.35 GB | CC BY-NC-ND 4.0 | Private |
 | `amassx`: [AMASS SMPL-X][amassx], human | Your copy | 60 to 250 Hz | 0.3 GB for 4.2 h at 30 Hz | AMASS: non-commercial research, no redistribution | No |
+| `seed`: [BONES-SEED][seed], human | 142,220 | 120 Hz | 45 GB, 276 GB unpacked | BONES-SEED: academic or startup (revenue under $1M) use only, no redistribution | No |
 | `lafan1`: [LAFAN1][lafan1] | 40 | 30 Hz | 0.3 GB | CC BY-NC-ND 4.0 | No |
 | `amass`: [AMASS][amass], all subsets | 17,717 | 60 to 250 Hz | 7 GB | AMASS: non-commercial research, no redistribution | No |
 | `motiondecode`: [ChingMu MotionDecode][motiondecode] | 92,559 | 120 Hz | 148 GB | ChingMu: non-commercial research, not to be hosted as a competing dataset | No |
@@ -23,10 +24,10 @@ sign in with a Hugging Face account that can read the private repo.
 | `kimodolh2`: [Kimodo G1 long-horizon v2][kimodolh2] | 10,000 | 50 Hz | 5.8 GB | Apache-2.0 | Yes |
 | `kimodolh3`: [Kimodo G1 long-horizon v3][kimodolh3] | 10,000 | 50 Hz | 12.8 GB | Apache-2.0 | Yes |
 
-`src/lite_motion_retargeting/sources/` defines each source and its loader. The `amassx`,
-`amass` and `motiondecode` motions stay in your local store, `dataset/`, for training.
-`uv run publish` uploads `lafan1bvh` to a private repo, and the three Kimodo sets to a
-public one.
+`src/lite_motion_retargeting/sources/` defines each source and its loader. The `seed`,
+`amassx`, `amass` and `motiondecode` motions stay in your local store, `dataset/`, for
+training. `uv run publish` uploads `lafan1bvh` to a private repo, and the three Kimodo sets
+to a public one.
 See [Publish to the Hub](#publish-to-the-hub).
 
 `lafan1bvh` is the human motion that the authors of `lafan1` retargeted: the BVH takes of
@@ -39,6 +40,30 @@ reader builds the body with the SMPL-X model of AMASS, which it reads from
 `.cache/smplx/SMPLX_NEUTRAL.npz`. Both need an MPI account, so `uv run download` cannot
 fetch them. Copy the clips to `.cache/amassx/smplx/` and the model to `.cache/smplx/`
 yourself. [UMR on AMASS](#umr-on-amass) prepares a sample of them.
+
+`seed` is [BONES-SEED][seed] by Bones Studio: 288 h of motion capture by 522 actors. Half
+of its takes are mirrors of the other half, and their names end in `_M`. This source reads
+the SOMA Proportional form: BVH skeletons that keep the proportions of each actor, and thus
+the foot contacts of the capture. The reader takes the rest pose of each joint from the
+T-pose of the SOMA rig in the download. The hands have finger joints, but no finger moves
+in 60 random takes.
+
+The Hub repo of BONES-SEED is gated, so accept its license on the Hub first. Then
+`uv run download --source seed` fetches the 45 GB archive, and files each take under
+`clips/<category>/`, after the 20 categories of the metadata. With 120 workers, the IK
+retargets the 288 h in 3 h, and the store takes 1.3 TB, most of it the base layer: 78
+joints at 120 Hz. Where an actor stands, a Lite Pro foot slides 1.8 cm/s in the mean
+take.
+
+In 476 takes, some channels are NaN between valid frames, or a bone length is NaN, and the
+reader skips the take. In 206 other takes, NaN frames end the take, and the reader drops
+these frames.
+
+**Warning:** Keep the `seed` clips and their retargets in a directory that only you can
+read, and out of the Hub and the motion browser. The license of BONES-SEED admits academic
+users and startups with a revenue under $1M a year only. It forbids any redistribution, and
+it binds you to keep the data confidential. A model or a page that uses the motions must
+credit "Motion Data by Bones Studio", with a link to <https://bones.studio/>.
 
 The other sources ship G1 motion only. MotionDecode gives its BVH files on request, and
 Kimodo generated its clips on the G1 directly.
@@ -811,6 +836,7 @@ can train on these motions.
 [lafan1bvh]: https://github.com/ubisoft/ubisoft-laforge-animation-dataset
 [amass]: https://huggingface.co/datasets/fleaven/Retargeted_AMASS_for_robotics
 [amassx]: https://amass.is.tue.mpg.de
+[seed]: https://huggingface.co/datasets/bones-studio/seed
 [motiondecode]: https://huggingface.co/datasets/CMRobot/MotionDecode
 [kimodo]: https://huggingface.co/datasets/cagataydev/kimodo-g1-motion-v1
 [kimodolh2]: https://huggingface.co/datasets/cagataydev/kimodo-g1-longhorizon-v2

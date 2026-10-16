@@ -19,7 +19,14 @@ from .g1 import (
     load_motiondecode,
     unpack_kimodo,
 )
-from .human import HumanClip, load_amass_smplx, load_lafan1_bvh
+from .human import (
+    SEED_ARCHIVE,
+    HumanClip,
+    load_amass_smplx,
+    load_lafan1_bvh,
+    load_seed_bvh,
+    unpack_seed,
+)
 
 
 class Source(NamedTuple):
@@ -60,6 +67,20 @@ SOURCES: dict[str, Source] = {
         clip_dir="bvh",
         clip_glob="*.bvh",
         load=load_lafan1_bvh,
+    ),
+    "seed": Source(
+        title="BONES-SEED",
+        license="BONES-SEED: academic or startup (revenue under $1M) use only, no redistribution, credit Bones Studio",
+        skeleton="Human, SOMA, 78 joints with fingers",
+        repo_id="bones-studio/seed",
+        allow_patterns=(
+            SEED_ARCHIVE, "metadata/*.parquet", "soma_shapes/soma_base_rig/*", "README.md", "LICENSE.md",
+        ),
+        page="https://bones.studio/datasets/seed",
+        clip_dir="clips",
+        clip_glob="*/*.bvh",
+        load=load_seed_bvh,
+        unpack=unpack_seed,
     ),
     "amassx": Source(
         title="AMASS SMPL-X",

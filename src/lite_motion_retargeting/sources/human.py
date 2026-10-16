@@ -15,11 +15,13 @@ A body is the frame at a joint of the skeleton, and it turns with the segment th
 at that joint: ``left_knee`` sits at the knee and turns with the shin.
 """
 
+import tarfile
 from functools import cache
 from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
+import pyarrow.parquet as pq
 from scipy.spatial.transform import Rotation
 
 from .. import CACHE_ROOT
@@ -173,6 +175,126 @@ def load_lafan1_bvh(path: Path) -> HumanClip:
     world_pos = positions @ _BVH_TO_WORLD.T
     joints = [names.index(LAFAN1_JOINTS[body]) for body in HUMAN_BODIES]
     rest_rot = np.stack([_LAFAN1_REST[names[joint]] for joint in joints])
+    normalized = world_rot[:, joints] @ np.swapaxes(rest_rot, -1, -2)
+    return HumanClip(
+        fps=round(1.0 / frame_time),
+        source_bodies=tuple(names),
+        source_pos=world_pos.astype(np.float32),
+        source_quat=_wxyz(world_rot),
+        pos=world_pos[:, joints].astype(np.float32),
+        quat=_wxyz(normalized),
+        rest=rest_pos[joints].astype(np.float32),
+    )
+
+
+# ── BONES-SEED ────────────────────────────────────────────────────────────────
+
+#: The SOMA rig of BONES-SEED, which the download holds. Its first frame is a T-pose: y up,
+#: facing +z, the left arm along +x, and the ``Root`` joint on the floor.
+SEED_RIG: Path = CACHE_ROOT / "seed" / "soma_shapes" / "soma_base_rig" / "soma_base_skel_minimal.bvh"
+
+#: Body of :data:`HUMAN_BODIES` -> the SOMA joint at the same place. No body maps to
+#: ``Spine2``, ``Neck2``, the clavicles (``LeftShoulder``, ``RightShoulder``) or the fingers.
+SEED_JOINTS: dict[str, str] = {
+    "pelvis": "Hips",
+    "left_hip": "LeftLeg",
+    "left_knee": "LeftShin",
+    "left_foot": "LeftFoot",
+    "left_toe": "LeftToeBase",
+    "right_hip": "RightLeg",
+    "right_knee": "RightShin",
+    "right_foot": "RightFoot",
+    "right_toe": "RightToeBase",
+    "waist": "Spine1",
+    "chest": "Chest",
+    "neck": "Neck1",
+    "head": "Head",
+    "left_shoulder": "LeftArm",
+    "left_elbow": "LeftForeArm",
+    "left_hand": "LeftHand",
+    "right_shoulder": "RightArm",
+    "right_elbow": "RightForeArm",
+    "right_hand": "RightHand",
+}
+
+#: The archive of the SOMA Proportional takes: each skeleton keeps the proportions of its
+#: actor, and thus the contacts of the capture. SOMA Uniform moves every actor onto one
+#: skeleton.
+SEED_ARCHIVE: str = "soma_proportional.tar.gz"
+
+
+def unpack_seed(root: Path) -> None:
+    """Extract the SOMA Proportional takes into ``clips/<category>/<take>.bvh``.
+
+    The archive files each take under the date of its capture. The metadata gives each take
+    one of 20 categories, such as ``Basic Locomotion Neutral``, which the motion browser
+    shows. Half of the takes are mirrors of the others, and their names end in ``_M``. A run
+    that stopped part way can run again: it extracts only if no take is in ``clips/`` yet,
+    and moves the takes that are still in the archive layout.
+    """
+    if not any((root / "clips").glob("*/*.bvh")):
+        with tarfile.open(root / SEED_ARCHIVE) as archive:
+            archive.extractall(root, filter="data")
+    metadata = max((root / "metadata").glob("seed_metadata_v*.parquet"))
+    table = pq.read_table(metadata, columns=["filename", "category", "move_soma_proportional_path"]).to_pydict()
+    for name, category, path in zip(
+        table["filename"], table["category"], table["move_soma_proportional_path"], strict=True
+    ):
+        if (root / path).exists():
+            target = root / "clips" / category.replace(" ", "_") / f"{name}.bvh"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            (root / path).rename(target)
+    for folder in sorted((root / SEED_ARCHIVE.removesuffix(".tar.gz")).glob("**/"), reverse=True):
+        if not any(folder.iterdir()):
+            folder.rmdir()
+
+
+@cache
+def _seed_rest() -> dict[str, np.ndarray]:
+    """Return the world rotation of each SOMA joint in the T-pose, facing +x.
+
+    The rotations come from the first frame of :data:`SEED_RIG`. Every BONES-SEED skeleton
+    shares the joints and their axes of this rig, and only the bone lengths differ.
+    """
+    if not SEED_RIG.exists():
+        raise FileNotFoundError(f"{SEED_RIG} is missing. Run `uv run download --source seed`.")
+    names, parents, offsets, channels, values, _ = _read_bvh(SEED_RIG)
+    rotations, _ = _bvh_world(parents, offsets, channels, values[:1])
+    return {name: _BVH_TO_WORLD @ rotations[0, joint] for joint, name in enumerate(names)}
+
+
+def load_seed_bvh(path: Path) -> HumanClip:
+    """Read a BONES-SEED take: the 78 joints of SOMA, 120 Hz, y up, centimetres.
+
+    About 0.5% of the takes have frames with NaN channels. The reader drops such frames at
+    the start and at the end of a take. A take with such frames between valid frames raises
+    a ValueError, because no part of it is whole. So does a take whose skeleton has a NaN
+    offset.
+    """
+    rest = _seed_rest()
+    names, parents, offsets, channels, values, frame_time = _read_bvh(path)
+    if np.isnan(offsets).any():
+        raise ValueError(f"{path.name}: the skeleton has a NaN offset.")
+    broken = np.isnan(values).any(axis=1)
+    if broken.any():
+        valid = np.flatnonzero(~broken)
+        if len(valid) == 0 or broken[valid[0]:valid[-1]].any():
+            raise ValueError(f"{path.name}: {broken.sum()} of {len(values)} frames hold NaN, between valid frames.")
+        values = values[valid[0]:valid[-1] + 1]
+    rotations, positions = _bvh_world(parents, offsets, channels, values)
+
+    # Build the T-pose from the offsets of this skeleton and the rotations of the rig. The
+    # Root joint stands on the floor.
+    rest_pos = np.zeros((len(names), 3))
+    for joint, parent in enumerate(parents):
+        if parent >= 0:
+            rest_pos[joint] = rest_pos[parent] + rest[names[parent]] @ offsets[joint]
+    rest_pos[:, 2] -= rest_pos[names.index("Root"), 2]
+
+    world_rot = _BVH_TO_WORLD @ rotations
+    world_pos = positions @ _BVH_TO_WORLD.T
+    joints = [names.index(SEED_JOINTS[body]) for body in HUMAN_BODIES]
+    rest_rot = np.stack([rest[names[joint]] for joint in joints])
     normalized = world_rot[:, joints] @ np.swapaxes(rest_rot, -1, -2)
     return HumanClip(
         fps=round(1.0 / frame_time),

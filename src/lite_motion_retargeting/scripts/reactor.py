@@ -7,6 +7,7 @@ Usage:
     uv run --extra reactor reactor export --run logs/reactor/<run> --out dataset_reactor
 """
 
+import json
 import shutil
 from dataclasses import asdict
 from datetime import datetime
@@ -20,7 +21,7 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
 from .. import DATASET_ROOT, REPO_ROOT
 from ..kinematics import planted
-from ..reactor.env_cfg import agent_cfg, env_cfg
+from ..reactor.env_cfg import WRENCH_WEIGHT, agent_cfg, env_cfg
 from ..reactor.library import build_library, motion_paths
 from ..reactor.mdp import GoalCommandCfg, lost_track
 from ..retargeting import load_models, motion_metrics
@@ -44,6 +45,7 @@ def train(
     num_envs: int = 4096,
     iterations: int = 10_000,
     warmstart: int = 1_000,
+    wrench_weight: float = WRENCH_WEIGHT,
     run_name: str = "",
 ) -> None:
     """Train the policy and the goal offsets on the motions of ``source`` in ``store``.
@@ -55,17 +57,21 @@ def train(
         num_envs: The number of parallel simulations.
         iterations: The number of PPO iterations.
         warmstart: The number of PPO iterations before the goal offsets start to learn.
-        run_name: A suffix for the name of the run directory.
+        wrench_weight: The penalty on the L1 norm of the root force and of the root torque.
+        run_name: A suffix for the name of the run directory. The run directory also keeps
+            these arguments, in ``train.json``.
     """
+    arguments = {key: str(value) if isinstance(value, Path) else value for key, value in locals().items()}
     paths = motion_paths(source, clip, store)
     run = LOG_ROOT / (datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + (f"_{run_name}" if run_name else ""))
     run.mkdir(parents=True)
+    (run / "train.json").write_text(json.dumps(arguments, indent=2))
     library = build_library(paths, run)
     joints = tuple(np.load(library)["joints"])
     print(f"{len(paths)} motions, {len(joints)} joints actuated -> {run}")
 
     goals = GoalCommandCfg(library=str(library), warmstart=warmstart, save_to=str(run / "goals.pt"))
-    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals), device=DEVICE)
+    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals, wrench_weight), device=DEVICE)
     runner = MjlabOnPolicyRunner(RslRlVecEnvWrapper(env), asdict(agent_cfg(iterations, run_name)), str(run), DEVICE)
     runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True)
     env.command_manager.get_term("goals").save(run / "goals.pt")

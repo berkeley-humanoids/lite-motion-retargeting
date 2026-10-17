@@ -19,7 +19,7 @@ from .g1 import (
     load_motiondecode,
     unpack_kimodo,
 )
-from .human import HumanClip, load_lafan1_bvh
+from .human import HumanClip, load_amass_smplx, load_lafan1_bvh
 
 
 class Source(NamedTuple):
@@ -60,6 +60,16 @@ SOURCES: dict[str, Source] = {
         clip_dir="bvh",
         clip_glob="*.bvh",
         load=load_lafan1_bvh,
+    ),
+    "amassx": Source(
+        title="AMASS SMPL-X",
+        license="AMASS: non-commercial research, no redistribution",
+        skeleton="Human, SMPL-X, 22 body joints",
+        page="https://amass.is.tue.mpg.de",
+        # UMR takes a folder named "motions" for BONES-SEED, so the clips go in "smplx".
+        clip_dir="smplx",
+        clip_glob="**/*_stageii.npz",
+        load=load_amass_smplx,
     ),
     "lafan1": Source(
         title="LAFAN1",

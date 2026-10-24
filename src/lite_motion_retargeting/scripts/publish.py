@@ -15,7 +15,8 @@ step replaces the marker with a table that links each motion into the Rerun web 
 
 The browser page, ``site/``, goes to a static Space. Its ``collections.json`` lists the
 ``web/`` of each Hub dataset, as of the last commit to that repo. Thus the Space plays the
-same motions until the next publish.
+same motions until the next publish. If ``site/`` holds the character of the page, the
+character goes to the Space too.
 
 Usage:
     uv run publish --dry-run
@@ -59,6 +60,11 @@ FOLDER_FILES: int = 10_000
 
 #: The files of the page. The Space gets its own ``collections.json``.
 PAGE_FILES: tuple[str, ...] = ("index.html", "app.js", "style.css")
+
+#: The character of the page. Git does not track it, so this step uploads it only if it is
+#: in ``site/``. A commit only adds files, so the Space keeps the character of an earlier
+#: publish.
+CHARACTER: str = "character.vrm"
 
 #: The marker in a card that the motion index replaces.
 MOTIONS_MARKER: str = "<!-- motions -->"
@@ -171,6 +177,8 @@ def publish_page(api: HfApi, dry_run: bool) -> None:
         "collections.json": json.dumps(collections, indent=2).encode(),
         **{name: str(SITE_ROOT / name) for name in PAGE_FILES},
     }
+    if (SITE_ROOT / CHARACTER).exists():
+        files[CHARACTER] = str(SITE_ROOT / CHARACTER)
     print(f"page: {', '.join(files)} -> {SPACE_REPO_ID}")
     print(f"  {len(collections)} collections: " + ", ".join(c["url"] for c in collections))
     if dry_run:

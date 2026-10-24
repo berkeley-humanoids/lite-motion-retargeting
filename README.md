@@ -195,7 +195,8 @@ MotionDecode do not allow you to share their motions with the public.
 The page plays a motion in two views. **Animation** plays it on a character, and the page
 shows this view first. **URDF** plays it on the robot of the URDF. The character is the
 VRM 1.0 model at `site/character.vrm`, which git does not track. Without this file, the
-page shows only the robot.
+page shows only the robot. If `site/` holds the file, `uv run publish` uploads it to the
+[Space][space].
 
 The character uses the joint angles unchanged. Each joint turns its bone about the axis
 that the joint has in the URDF at rest, where the character and the robot both stand in a

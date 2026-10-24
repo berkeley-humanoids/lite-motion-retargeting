@@ -26,6 +26,10 @@ directly from the Hub, as a byte range of a pack. To also see the private collec
 your account can read, sign in with Hugging Face. The LAFAN1 motions are private, because
 the license of LAFAN1 does not allow anyone to share a retarget of it with the public.
 
+The **Animation** view plays each motion on NAI, a VRoid character by -T.K.-. The
+[VRM license](https://vrm.dev/licenses/1.0/) of NAI does not allow you to redistribute or
+modify `character.vrm`.
+
 `uv run publish` of [Lite-Motion-Retargeting][retarget] writes this Space. Change the
 files there, not here.
 

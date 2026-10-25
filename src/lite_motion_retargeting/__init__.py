@@ -17,7 +17,7 @@ Conventions:
 - Quaternions are scalar-first wxyz, unit-norm, with ``w >= 0``. A source file can store
   xyzw, and its loader in ``sources/`` converts it exactly once.
 - MuJoCo sets the column order of the Lite ``joint_pos`` from the MJCF
-  (:func:`robots.lite_joint_names`). No code hardcodes it.
+  (:func:`robots.joint_names`). No code hardcodes it.
 """
 
 from pathlib import Path

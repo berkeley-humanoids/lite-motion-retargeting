@@ -45,8 +45,8 @@ from ..kinematics import (
 from ..robots import (
     FEET,
     G1_JOINT_NAMES,
+    joint_names,
     joint_qpos_addr,
-    lite_joint_names,
     load_g1_model,
     load_lite_model,
 )
@@ -88,7 +88,7 @@ def load_models() -> Models:
     """Compile both robots, and Lite again with a free base for the human IK."""
     g1 = load_g1_model()
     lite = load_lite_model()
-    names = lite_joint_names(lite)
+    names = joint_names(lite)
     return Models(
         g1=g1,
         lite=lite,

@@ -31,6 +31,7 @@ from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 
+from ..robots import load_lite_model
 from .mdp import (
     STEPS_PER_ITERATION,
     GoalCommandCfg,
@@ -71,20 +72,13 @@ def lite_spec(joints: tuple[str, ...]) -> mujoco.MjSpec:
     return spec
 
 
-def robot_joints(active: set[str]) -> tuple[str, ...]:
-    """Return the joints of ``active`` in the order of the MJCF, which is the order of the robot entity."""
-    model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(ROBOT)))
-    names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)]
-    return tuple(name for name in names if name in active)
-
-
 def pd_gains(joints: tuple[str, ...]) -> dict[str, tuple[float, float, float]]:
     """Return the stiffness, the damping and the effort limit of each of ``joints``.
 
     A joint keeps the armature and the effort limit of its actuator in the MJCF. Its gains
     come from :data:`NATURAL_FREQUENCY_HZ`, with a damping ratio of 2, as BeyondMimic sets them.
     """
-    model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(ROBOT)))
+    model = load_lite_model(ROBOT)
     omega = 2.0 * np.pi * NATURAL_FREQUENCY_HZ
     gains = {}
     for actuator in range(model.nu):

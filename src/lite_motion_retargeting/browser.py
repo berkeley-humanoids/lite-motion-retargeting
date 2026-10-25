@@ -35,10 +35,8 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
 
-import mujoco
 import numpy as np
 import pyarrow as pa
-from lite_description import get_mjcf_path
 from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
@@ -46,7 +44,7 @@ from tqdm import tqdm
 from . import DATASET_ROOT, SITE_ROOT
 from .hub import VIEWER, layer_url
 from .retargeting.g1 import G1_DRIVEN
-from .robots import lite_urdf_path
+from .robots import joint_names, lite_urdf_path, load_lite_model
 from .sources import SOURCES, clip_dir, clip_key, motion_name, source_of
 from .store import BASE_LAYER
 
@@ -111,7 +109,7 @@ def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     mesh_mb = write_robot(urdf, out)
 
     clips = {source: clip_paths(source) for source in sources}
-    joint_names: list[str] = []
+    layer_joints: list[str] = []
     # Each set maps to its position, in the order that the motions first use it.
     joint_sets: dict[tuple[int, ...], int] = {}
     active_sets: dict[tuple[int, ...], int] = {}
@@ -121,9 +119,9 @@ def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
         exported = pool.map(partial(export_motion, robot=robot), paths, chunksize=16)
         for path, entry in tqdm(zip(paths, exported, strict=True), total=len(paths), unit="motion"):
             names = entry.pop("joint_names")
-            if not joint_names:
-                joint_names = names
-            if names != joint_names:
+            if not layer_joints:
+                layer_joints = names
+            if names != layer_joints:
                 raise SystemExit(f"{path}: its joints differ from the joints of the other motions.")
             joints, active = entry.pop("joints"), entry.pop("active")
             rows, preview = entry.pop("rows"), entry.pop("preview")
@@ -144,15 +142,15 @@ def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     index = {
         "robot": robot,
         "viewer": VIEWER,
-        "joint_names": joint_names,
+        "joint_names": layer_joints,
         "joint_sets": list(joint_sets),
         "active_sets": list(active_sets),
         "groups": [
-            {"title": title, "joints": [i for i, name in enumerate(joint_names) if re.fullmatch(pattern, name)]}
+            {"title": title, "joints": [i for i, name in enumerate(layer_joints) if re.fullmatch(pattern, name)]}
             for title, pattern in GROUPS.items()
         ],
         "robots": [
-            {"title": title, "joints": [joint_names.index(name) for name in robot_joints(variant)]}
+            {"title": title, "joints": [layer_joints.index(name) for name in joint_names(load_lite_model(variant))]}
             for variant, title in ROBOTS.items()
         ],
         "packs": packs.names,
@@ -279,15 +277,6 @@ def read_robot_layer(path: Path, robot: str) -> tuple[int, list[str], list[str],
         values(positions, "Scalars:scalars", len(joint_names)),
     ])
     return int(fps), list(joint_names), list(active), rows
-
-
-def robot_joints(variant: str) -> list[str]:
-    """Return the joint names of a Lite variant from its MJCF, without the free joint."""
-    model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(variant)))
-    return [
-        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint)
-        for joint in range(model.njnt) if model.jnt_type[joint] != mujoco.mjtJoint.mjJNT_FREE
-    ]
 
 
 def read_source_fps(path: Path) -> int | None:

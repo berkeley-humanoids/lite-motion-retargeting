@@ -24,7 +24,6 @@ from tqdm import tqdm
 from .. import DATASET_ROOT
 from ..hub import hub_dataset_of
 from ..retargeting import Clip, Models, load_models, retarget_clip
-from ..retargeting.ik.g1 import G1_TO_LITE
 from ..robots import lite_urdf_path
 from ..sources import clips, motion_name
 from ..store import (
@@ -67,9 +66,7 @@ def _worker_init() -> None:
     _MODELS = load_models()
 
 
-def _worker_retarget(
-    job: tuple[str, Path, str, bool, int, Path, bool, Path, bool],
-) -> tuple[list[Path], dict[str, float], str | None]:
+def _worker_retarget(job: tuple[str, Path, str, Path, bool, Path]) -> tuple[list[Path], dict[str, float], str | None]:
     """Retarget one clip in a worker, write its layers, and return their paths and metrics.
 
     A motion has files of its own, so no two workers write one file. Writing here keeps
@@ -78,9 +75,9 @@ def _worker_retarget(
     file among thousands does not stop the rest.
     """
     assert _MODELS is not None
-    source, path, name, ik, ik_iters, urdf, geometry, out, plant_feet = job
+    source, path, name, urdf, geometry, out = job
     try:
-        clip = retarget_clip(_MODELS, source, path, ik, ik_iters, show_progress=False, plant_feet=plant_feet)
+        clip = retarget_clip(_MODELS, source, path)
         written = write_motion(_MODELS, name, clip, urdf, geometry, out)
     except Exception as error:  # noqa: BLE001 -- the parent lists every failed clip
         return [], {}, f"{path}: {type(error).__name__}: {error}"
@@ -98,12 +95,9 @@ def print_metrics(rows: list[dict[str, float]]) -> None:
 def retarget(
     source: str = "lafan1",
     clip: str | None = None,
-    ik: bool = True,
-    ik_iters: int = 15,
     workers: int = 1,
     validate_only: bool = False,
     out: Path = DATASET_ROOT,
-    plant_feet: bool = True,
 ) -> None:
     """Retarget the clips of a source to Lite, and write the two layers of each motion.
 
@@ -111,34 +105,21 @@ def retarget(
         source: The key of the source in ``sources.SOURCES``.
         clip: A regex. Retarget only the clips whose path below the clip directory of the
             source matches it, such as ``CMU/07/07_01_poses_120_jpos`` for AMASS.
-        ik: Refine step 1 of a G1 source with the step-2 IK. Use ``--no-ik`` to keep only
-            step 1. A human source always uses its IK.
-        ik_iters: The number of Newton steps per frame, for both IKs.
         workers: The number of processes that retarget clips in parallel. ``-1`` uses every
             core.
         validate_only: Retarget only the first matching clip, print its metrics, and write
             nothing.
         out: The store to write. Use another directory to keep two runs apart and compare
             them.
-        plant_feet: Plant the feet of a human source. ``--no-plant-feet`` writes the goals
-            as the source gives them, and the IK that reaches them, for ReActor to start from.
     """
     if workers == -1:
         workers = os.cpu_count() or 1
     paths = clips(source, clip)
     names = [motion_name(source, path) for path in paths]
-
-    print("Loading models …")
-    models = load_models()
-    flipped = sum(1 for _, s, _ in G1_TO_LITE.values() if s < 0)
-    nonzero = sum(1 for _, _, off in G1_TO_LITE.values() if abs(off) > 1e-6)
-    print(f"  G1 nq={models.g1.nq}, Lite nq={models.lite.nq}, "
-          f"joints={len(models.joint_names)}")
-    print(f"  {len(G1_TO_LITE)} joint pairs, {flipped} sign flips, {nonzero} nonzero offsets")
-    print(f"  {len(paths)} clips of {source}, resampled to {FPS} Hz")
+    print(f"{len(paths)} clips of {source}, resampled to {FPS} Hz")
 
     if validate_only:
-        result = retarget_clip(models, source, paths[0], ik, ik_iters, plant_feet=plant_feet)
+        result = retarget_clip(load_models(), source, paths[0])
         print(f"\nClip: {paths[0].name} ({result.joint_pos.shape[0]} frames at {FPS} Hz, "
               f"from {result.source_fps} Hz)")
         print_metrics([result.metrics])
@@ -153,36 +134,23 @@ def retarget(
     dataset = hub_dataset_of(source)
     geometry = dataset is not None and dataset.geometry
 
-    failed = []
-    metrics = []
-    if workers > 1:
-        jobs = [
-            (source, path, name, ik, ik_iters, urdf, geometry, out, plant_feet)
-            for path, name in zip(paths, names, strict=True)
-        ]
-        # Spawn, not fork: the parent runs threads by now, and a forked child can inherit a
-        # held lock. ProcessPoolExecutor stops replacing workers that reach their task limit
-        # once many jobs are queued (CPython 3.13), so this uses multiprocessing.Pool.
-        with get_context("spawn").Pool(workers, _worker_init, maxtasksperchild=WORKER_CLIPS) as pool:
-            results = pool.imap(_worker_retarget, jobs)
-            for files, clip_metrics, error in tqdm(
-                results, total=len(jobs), desc=f"Clips (workers={workers})", unit="clip"
-            ):
-                written += files
-                if error is not None:
-                    failed.append(error)
-                else:
-                    metrics.append(clip_metrics)
-        if failed:
-            print(f"\n{len(failed)} of {len(jobs)} clips failed and were skipped:")
-            for error in failed:
-                print(f"  {error}")
-    else:
-        for path, name in tqdm(zip(paths, names, strict=True), total=len(names), desc="Clips",
-                               unit="clip"):
-            result = retarget_clip(models, source, path, ik, ik_iters, plant_feet=plant_feet)
-            written += write_motion(models, name, result, urdf, geometry, out)
-            metrics.append(result.metrics)
+    jobs = [(source, path, name, urdf, geometry, out) for path, name in zip(paths, names, strict=True)]
+    failed, metrics = [], []
+    # Spawn, not fork: the parent runs threads by now, and a forked child can inherit a held
+    # lock. ProcessPoolExecutor stops replacing workers that reach their task limit once many
+    # jobs are queued (CPython 3.13), so this uses multiprocessing.Pool.
+    with get_context("spawn").Pool(workers, _worker_init, maxtasksperchild=WORKER_CLIPS) as pool:
+        results = pool.imap(_worker_retarget, jobs)
+        for files, clip_metrics, error in tqdm(results, total=len(jobs), desc=f"Clips (workers={workers})", unit="clip"):
+            written += files
+            if error is not None:
+                failed.append(error)
+            else:
+                metrics.append(clip_metrics)
+    if failed:
+        print(f"\n{len(failed)} of {len(jobs)} clips failed and were skipped:")
+        for error in failed:
+            print(f"  {error}")
 
     if metrics:
         print_metrics(metrics)

@@ -134,31 +134,22 @@ class Clip(NamedTuple):
     active_joints: tuple[str, ...]
 
 
-def retarget_clip(
-    models: Models,
-    source: str,
-    path: Path,
-    do_ik: bool,
-    ik_iters: int,
-    show_progress: bool = True,
-    plant_feet: bool = True,
-) -> Clip:
+def retarget_clip(models: Models, source: str, path: Path) -> Clip:
     """Run every step on one clip of ``source``, and pose the bodies that each layer holds.
 
     The base layer keeps the source as it is, at its own rate and in its own frame
     convention. The robot layer holds the goal of each link in the convention of that link,
     so the goal compares directly against the link. The goal of the root is where the
     retarget put the base, so the robot and its goals share one root.
-
-    If ``plant_feet`` is False, a human clip skips :func:`human.plant`: the IK then reaches
-    the goals as the source gives them, as a start for a method that fixes the feet itself,
-    such as ReActor.
     """
     loaded = SOURCES[source].load(path)
     if isinstance(loaded, HumanClip):
-        return _retarget_human(models, loaded, ik_iters, plant_feet)
+        return _retarget_human(models, loaded)
+    return _retarget_g1(models, *loaded)
 
-    clip, source_fps = loaded
+
+def _retarget_g1(models: Models, clip: dict[str, np.ndarray], source_fps: int) -> Clip:
+    """Retarget one G1 clip: the joint copy of ``ik/g1.py``, then the IK that refines it."""
     source_pos, source_quat = world_poses(
         models.g1, models.g1_addrs, clip["g1_joint_pos"],
         clip["base_pos"], clip["base_quat_wxyz"], SOURCE_BODIES[1:],
@@ -166,10 +157,7 @@ def retarget_clip(
 
     motion = resample_motion(clip, source_fps, FPS)
     joint_pos = step1_direct_remap(motion["g1_joint_pos"], models.joint_names)
-    if do_ik:
-        joint_pos = step2_ik_refine(
-            models, motion["g1_joint_pos"], joint_pos, ik_iters, show_progress
-        )
+    joint_pos = step2_ik_refine(models, motion["g1_joint_pos"], joint_pos)
     joint_pos[:, [name not in G1_DRIVEN for name in models.joint_names]] = 0.0
 
     base_pos = motion["base_pos"].astype(np.float32)
@@ -212,22 +200,18 @@ def human_planted(pos: np.ndarray) -> np.ndarray:
     return planted(pos[:, points], FPS)
 
 
-def _retarget_human(models: Models, clip: HumanClip, ik_iters: int, plant_feet: bool) -> Clip:
-    """Retarget one human clip: goals from ``human.py``, then the floating-base IK."""
+def _retarget_human(models: Models, clip: HumanClip) -> Clip:
+    """Retarget one human clip: the planted goals of ``ik/human.py``, then the floating-base IK."""
     pos, quat = resample_poses(clip.pos, clip.quat, clip.fps, FPS)
     feet_planted = human_planted(pos)
     goal_pos, goal_quat = goals(pos, quat, calibrate(models.lite, clip.rest))
-    if plant_feet:
-        goal_pos = plant(goal_pos, goal_quat, feet_planted, sole(models.lite, FEET))
-    base_pos, base_quat, joint_pos = solve_ik(
-        models.floating, models.joint_names, goal_pos, goal_quat, ik_iters
-    )
+    goal_pos = plant(goal_pos, goal_quat, feet_planted, sole(models.lite, FEET))
+    base_pos, base_quat, joint_pos = solve_ik(models.floating, models.joint_names, goal_pos, goal_quat)
     active = driven_joints(models.lite)
     joint_pos[:, [name not in active for name in models.joint_names]] = 0.0
 
     # The planted goals stand on the floor, and the IK leaves the soles within a few
     # millimetres of them. Thus the shift is small, and it moves the goals with the robot.
-    # Goals that are not planted can float or sink, and the shift grounds the median frame.
     shift = ground_height(models, joint_pos, base_pos, base_quat)
     base_pos[:, 2] += shift
     goal_pos[:, :, 2] += shift

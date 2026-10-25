@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import mujoco
 import numpy as np
-from tqdm import tqdm
 
 from ...robots import BASE_BODY, G1_JOINT_NAMES, body_id, joint_qpos_addr
 
@@ -84,6 +83,9 @@ G1_TO_LITE: dict[str, tuple[str, int, float]] = {
 #: The Lite joints that a G1 source drives. The neck, the ankle yaw, and the fingers have no
 #: G1 joint, and hold their default.
 G1_DRIVEN: tuple[str, ...] = tuple(lite for lite, _, _ in G1_TO_LITE.values())
+
+#: Newton steps per frame of :func:`step2_ik_refine`.
+_NEWTON_STEPS: int = 15
 
 
 def _rest_frame_conversions(g1: mujoco.MjModel, lite: mujoco.MjModel) -> dict[str, np.ndarray]:
@@ -170,18 +172,10 @@ def _posture_cost(lite: mujoco.MjModel) -> np.ndarray:
     return cost
 
 
-def step2_ik_refine(
-    models: "Models",
-    g1_joint_pos: np.ndarray,
-    step1_joint_pos: np.ndarray,
-    iters: int,
-    show_progress: bool,
-) -> np.ndarray:
+def step2_ik_refine(models: "Models", g1_joint_pos: np.ndarray, step1_joint_pos: np.ndarray) -> np.ndarray:
     """Refine the step-1 joints to match the feet and hands of the G1 relative to the pelvis.
 
-    The IK solves each frame on its own, from the step-1 seed. ``show_progress`` shows a
-    progress bar for the frames. Workers turn it off, so that their bars do not mix in the
-    terminal.
+    The IK solves each frame on its own, from the step-1 seed.
     """
     import mink
 
@@ -198,8 +192,7 @@ def step2_ik_refine(
 
     out = step1_joint_pos.copy()
     seed = np.zeros(models.lite.nq, dtype=np.float64)
-    frames = range(step1_joint_pos.shape[0])
-    for t in tqdm(frames, desc="    IK", leave=False, unit="frame", disable=not show_progress):
+    for t in range(step1_joint_pos.shape[0]):
         g1_data.qpos[models.g1_addrs] = g1_joint_pos[t]
         mujoco.mj_kinematics(models.g1, g1_data)
         for lite_name, g1_name in IK_BODY_PAIRS.items():
@@ -212,7 +205,7 @@ def step2_ik_refine(
         seed[models.joint_addrs] = step1_joint_pos[t]
         configuration.q[:] = seed
         posture_task.set_target(seed.copy())
-        for _ in range(iters):
+        for _ in range(_NEWTON_STEPS):
             vel = mink.solve_ik(
                 configuration, tasks, 1.0, solver="daqp", damping=1e-1, limits=limits
             )

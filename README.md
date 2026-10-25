@@ -231,8 +231,8 @@ modules are the library that the steps share:
 | `browser.py` | Writes the motions and the robot meshes for the page. |
 | `hub.py` | Lists the Hub datasets, and names the Space. |
 
-`uv run retarget` takes `--source <name>`, `--clip <regex>`, `--no-ik`, `--ik-iters N`,
-`--workers N`, `--out <dir>` and `--validate-only`. `--out` writes the store to another
+`uv run retarget` takes `--source <name>`, `--clip <regex>`, `--workers N`, `--out <dir>`
+and `--validate-only`. `--out` writes the store to another
 directory. `--validate-only` prints the metrics of the first clip and writes nothing. The
 regex of `--clip` matches the path of a clip below the clip directory of its source,
 without the suffix, such as `CMU/07/07_01_poses_120_jpos`. The motion name comes from the

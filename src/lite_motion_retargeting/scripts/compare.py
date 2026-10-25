@@ -57,12 +57,12 @@ import tyro
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from .. import CACHE_ROOT, DATASET_ROOT
+from .. import DATASET_ROOT
 from ..kinematics import planted, quat_mul, resample_motion, resample_poses
 from ..retargeting import Models, human_planted, load_models, motion_samples, summarize
 from ..retargeting.human import calibrate, goals
 from ..robots import FEET, lite_model_hash
-from ..sources import SOURCES, clip_key, motion_name
+from ..sources import SOURCES, clip_key, clips, motion_name
 from ..sources.human import HumanClip
 from ..store import FPS, read_robot_layer
 
@@ -342,15 +342,8 @@ def compare(
         out: Also write the summary of every piece, and its sample counts, a piece per row,
             to this JSON file.
     """
-    if source not in SOURCES:
-        raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")
-    spec = SOURCES[source]
-    clip_dir = CACHE_ROOT / source / spec.clip_dir
-    paths = [
-        path for path in sorted(clip_dir.glob(spec.clip_glob))
-        if clip is None or re.search(clip, clip_key(clip_dir, path))
-    ]
-    names = [motion_name(source, clip_dir, path) for path in paths]
+    paths = clips(source, clip)
+    names = [motion_name(source, path) for path in paths]
     missing = [name for name in names if not (store / ROBOT / f"{name}.rrd").exists()]
     if missing:
         raise SystemExit(f"{len(missing)} of {len(names)} motions are not in {store}. Run `uv run retarget`.")
@@ -359,7 +352,7 @@ def compare(
         if source not in UMR_TURNS:
             raise SystemExit(f"The world of a UMR motion of {source} is unknown. Add its turn to UMR_TURNS.")
         # UMR names a motion after its input file and its robot, and SMPL-X files keep the clip names.
-        jobs = [(*job[:5], umr / f"{clip_key(clip_dir, job[1])}_{umr.name}.npz") for job in jobs]
+        jobs = [(*job[:5], umr / f"{clip_key(source, job[1])}_{umr.name}.npz") for job in jobs]
         jobs = [job for job in jobs if job[5].exists()]
         print(f"UMR has {len(jobs)} of {len(paths)} clips in {umr}.")
     if not jobs:

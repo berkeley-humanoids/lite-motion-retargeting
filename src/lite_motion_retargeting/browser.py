@@ -43,11 +43,11 @@ from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from . import CACHE_ROOT, DATASET_ROOT, SITE_ROOT
+from . import DATASET_ROOT, SITE_ROOT
 from .hub import VIEWER, layer_url
 from .retargeting.g1 import G1_DRIVEN
 from .robots import lite_urdf_path
-from .sources import SOURCES, clip_key, motion_name, source_of
+from .sources import SOURCES, clip_dir, clip_key, motion_name, source_of
 from .store import BASE_LAYER
 
 SITE_DATA: Path = SITE_ROOT / "data"
@@ -306,11 +306,9 @@ def clip_paths(source: str) -> dict[str, str]:
     A motion name flattens the path of its clip, so only the downloaded source keeps the
     folders that give the category. The map leaves out each clip that is not in the cache.
     """
-    spec = SOURCES[source]
-    clip_dir = CACHE_ROOT / source / spec.clip_dir
     return {
-        motion_name(source, clip_dir, path): clip_key(clip_dir, path)
-        for path in clip_dir.glob(spec.clip_glob)
+        motion_name(source, path): clip_key(source, path)
+        for path in clip_dir(source).glob(SOURCES[source].clip_glob)
     }
 
 

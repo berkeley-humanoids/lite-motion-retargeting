@@ -14,7 +14,6 @@ Usage:
 """
 
 import os
-import re
 from multiprocessing import get_context
 from pathlib import Path
 
@@ -22,12 +21,12 @@ import numpy as np
 import tyro
 from tqdm import tqdm
 
-from .. import CACHE_ROOT, DATASET_ROOT
+from .. import DATASET_ROOT
 from ..hub import hub_dataset_of
 from ..retargeting import Clip, Models, load_models, retarget_clip
 from ..retargeting.g1 import G1_TO_LITE
 from ..robots import lite_urdf_path
-from ..sources import SOURCES, clip_key, motion_name
+from ..sources import clips, motion_name
 from ..store import (
     FPS,
     write_asset,
@@ -124,24 +123,10 @@ def retarget(
         plant_feet: Plant the feet of a human source. ``--no-plant-feet`` writes the goals
             as the source gives them, and the IK that reaches them, for ReActor to start from.
     """
-    if source not in SOURCES:
-        raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")
     if workers == -1:
         workers = os.cpu_count() or 1
-
-    spec = SOURCES[source]
-    clip_dir = CACHE_ROOT / source / spec.clip_dir
-    paths = sorted(clip_dir.glob(spec.clip_glob))
-    if clip is not None:
-        paths = [p for p in paths if re.search(clip, clip_key(clip_dir, p))]
-    if not paths:
-        raise SystemExit(
-            f"No clips to retarget under {clip_dir} (clip={clip!r}). "
-            f"Run `uv run download --source {source}` first."
-        )
-    names = [motion_name(source, clip_dir, p) for p in paths]
-    if len(set(names)) != len(names):
-        raise SystemExit(f"Two clips of {source} map to one motion name.")
+    paths = clips(source, clip)
+    names = [motion_name(source, path) for path in paths]
 
     print("Loading models …")
     models = load_models()

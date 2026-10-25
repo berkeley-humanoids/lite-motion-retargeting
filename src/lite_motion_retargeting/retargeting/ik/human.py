@@ -1,6 +1,6 @@
 """Map human motion onto Lite: the goal pose of each Lite link, and the IK that reaches it.
 
-Every retargeting backend shares this mapping. It turns the human bodies of
+The IK and ReActor share this mapping. It turns the human bodies of
 ``sources/human.py`` into a goal pose for each Lite link in :data:`LITE_PAIRS`:
 
 * **Calibration.** Both skeletons stand in the T-pose, facing +x. The scale is the ratio of
@@ -18,8 +18,8 @@ Every retargeting backend shares this mapping. It turns the human bodies of
   place and on the floor. A shift of all the goals together keeps them reachable. If a foot
   still dips below the floor, only the goal of that foot rises.
 
-The IK backend (:func:`solve_ik`) solves for the joints that reach these goals, frame by
-frame. An RL backend such as ReActor tracks the same goals in simulation.
+The IK (:func:`solve_ik`) solves for the joints that reach these goals, frame by frame.
+ReActor tracks the same goals in simulation.
 """
 
 from typing import NamedTuple

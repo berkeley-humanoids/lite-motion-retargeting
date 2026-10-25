@@ -1,6 +1,6 @@
 """Retarget the clips of a source to Lite, and write two layers per motion into the store.
 
-``retargeting/`` documents how a clip is retargeted. One clip becomes two layers of one
+``retargeting/ik/`` documents how the IK retargets a clip. One clip becomes two layers of one
 motion in ``dataset/``: ``base/``, the source clip as published at its own rate, and
 ``lite_pro/``, at the 50 Hz control rate, with the joints that the IK reached and the goal
 that it aimed at. ``store.py`` defines the store, and ``uv run publish`` uploads it.

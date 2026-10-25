@@ -1,31 +1,15 @@
 """Measure the IK, UMR and ReActor on the same frames of one source, with one planted mask.
 
-Each method writes its motions in its own form. ``uv run retarget`` writes the IK store, and
-``reactor export`` writes a store in which a motion can be cut into pieces. UMR writes
-``<clip>_<robot>.npz`` into a folder named after its robot. This step reads the base and
-the joints of each method, and measures them with ``retargeting.metrics.motion_samples``.
-
-The metrics that a store keeps do not compare across methods. The IK measures the foot slide
-on the frames where the source plants a foot, and ``reactor export`` on the frames where its
-learned goals plant one. Here every method uses the mask of the source. With a ReActor
-store, every method is measured on the frames of each ReActor piece.
-
-The tables pool the samples of every piece: a mean is over every sample, and a median or a
-percentile too. Thus a long motion counts more than a short one, a motion with no contact
-adds no slide, and the cut of a motion into pieces changes nothing.
-
-Three metrics compare a motion with its source, whatever the method aims for: the
-``limb_angle_deg`` and the ``root_error_cm`` of ``retargeting.metrics.fidelity``, and the
-``contact_iou`` of where the sole of the robot is near the floor against where the source
-stands. ``retargeting.umr.read_umr`` moves a UMR motion into the world of the IK.
+``docs/comparison.md`` explains the method and gives the results. Each method writes its
+motions in its own form: ``uv run retarget`` the IK store, ``reactor export`` a store in
+which a motion can be cut into pieces, and UMR a folder of ``<clip>_<robot>.npz``. This step
+reads the base and the joints of each method, and measures them with the stance mask of the
+source, on the frames of each ReActor piece. The tables pool every sample of every piece.
 
 UMR scales the human by its height, not by the height of its pelvis as the IK does. Thus a
 UMR link is not where the goal of the IK is, and this step leaves out the goal errors of
 UMR. A joint that the source does not drive holds 0 in every method, as it does in the IK.
-
-Every layer records the hash of the model of Lite that it was written for, and a UMR run
-records it in ``manifest.json``. This step stops if a hash differs from that of the
-installed Lite.
+The step stops if a layer or a UMR run records another model of Lite than the installed one.
 
 Usage:
     uv run compare --source lafan1bvh --umr ../umr/output/lite_pro

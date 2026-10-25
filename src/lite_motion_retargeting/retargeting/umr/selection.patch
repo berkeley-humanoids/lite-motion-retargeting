@@ -14,7 +14,7 @@ config switch the fixes, and each default keeps the behavior of UMR:
 warm_start_debug_dir saves both solves, both costs, and the pick of each frame.
 
 The sequential solve of umr/batch.json is bit-identical with or without the patch.
-See "Why UMR slides" in the README for what the fixes change.
+See "Why UMR slides" in docs/comparison.md for what the fixes change.
 
 diff --git a/scripts/humanoid_retarget_pipeline.py b/scripts/humanoid_retarget_pipeline.py
 index e567e89..cd29652 100644

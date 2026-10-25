@@ -159,7 +159,7 @@ def write_robot_layer(
     Its goal is the base trajectory of the retarget, so the goal and the reached pose are
     the same pose for that one body.
 
-    ``metrics`` are the quality numbers of ``retargeting.motion_metrics``. The layer keeps
+    ``metrics`` are the quality numbers of ``retargeting.metrics.motion_metrics``. The layer keeps
     them as the ``metrics`` property, so a motion records how well the retarget went.
 
     ``active_joints`` are the joints that the source drives, kept as
@@ -220,8 +220,8 @@ def write_robot_layer(
 def read_robot_layer(path: Path, robot: str) -> dict:
     """Read the ``robot`` layer at ``path``: its joints, its goals, and the joints that its source drives.
 
-    ``model`` is the hash of the robot model that the layer was written for, or None for a
-    layer that does not record it.
+    ``model`` is the hash of the robot model that the layer was written for, and ``active``
+    the joints that its source drives. Each is None for a layer older than its property.
     """
     columns: dict[str, list[pa.RecordBatch]] = {}
     properties = None
@@ -249,7 +249,7 @@ def read_robot_layer(path: Path, robot: str) -> dict:
         "fps": properties["fps"][0][0],
         "model": properties["model"][0][0] if "model" in properties else None,
         "joint_names": joint_names,
-        "active": properties["active_joint_names"][0],
+        "active": properties["active_joint_names"][0] if "active_joint_names" in properties else None,
         "bodies": bodies,
         "sources": properties["source_body_names"][0],
         "joint_pos": values(f"/{robot}/joint/positions", "Scalars:scalars", len(joint_names)),

@@ -63,9 +63,9 @@ G1_JOINT_NAMES: tuple[str, ...] = (
 )
 
 
-def load_lite_model() -> mujoco.MjModel:
-    """Load the Lite Pro MJCF, the same asset that the training repo loads."""
-    return mujoco.MjModel.from_xml_path(str(get_mjcf_path("lite_pro")))
+def load_lite_model(variant: str = "lite_pro") -> mujoco.MjModel:
+    """Load the MJCF of a Lite variant, the same asset that the training repo loads."""
+    return mujoco.MjModel.from_xml_path(str(get_mjcf_path(variant)))
 
 
 def lite_urdf_path() -> Path:
@@ -82,9 +82,9 @@ def model_hash(mjcf_path: Path) -> str:
     """Return a short hash of a robot MJCF and of the ``meshes`` folder beside its folder.
 
     The hash names one version of a robot model. ``mjcf_path`` is ``<robot>/mjcf/<name>.xml``,
-    as ``lite-description`` lays it out, or the copy of it that UMR reads. UMR writes files
-    of its own into the ``mjcf`` folder, so only the MJCF itself counts. ``umr/manifest.py``
-    computes the same hash.
+    as ``lite-description`` lays it out, or the copy of it that UMR reads, which
+    ``retargeting/umr/manifest.py`` hashes. UMR writes files of its own into the ``mjcf``
+    folder, so only the MJCF itself counts.
     """
     digest = hashlib.sha256()
     meshes = mjcf_path.parent.parent / "meshes"
@@ -133,8 +133,8 @@ def body_id(model: mujoco.MjModel, body_name: str) -> int:
     return bid
 
 
-def lite_joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
-    """Return the names of the Lite joints, except a free joint, in the order of MuJoCo.
+def joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
+    """Return the names of the joints of ``model``, except a free joint, in the order of MuJoCo.
 
     MuJoCo orders the joints depth first. The names give the column order of ``joint_pos``,
     and the motion file stores them, so a loader maps a column to a robot joint by name.
@@ -145,6 +145,6 @@ def lite_joint_names(model: mujoco.MjModel) -> tuple[str, ...]:
             continue
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jid)
         if name is None:
-            raise RuntimeError(f"Lite joint {jid} has no name.")
+            raise RuntimeError(f"Joint {jid} has no name.")
         names.append(name)
     return tuple(names)

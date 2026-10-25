@@ -1,6 +1,6 @@
 """Map human motion onto Lite: the goal pose of each Lite link, and the IK that reaches it.
 
-Every retargeting backend shares this mapping. It turns the human bodies of
+The IK and ReActor share this mapping. It turns the human bodies of
 ``sources/human.py`` into a goal pose for each Lite link in :data:`LITE_PAIRS`:
 
 * **Calibration.** Both skeletons stand in the T-pose, facing +x. The scale is the ratio of
@@ -18,8 +18,8 @@ Every retargeting backend shares this mapping. It turns the human bodies of
   place and on the floor. A shift of all the goals together keeps them reachable. If a foot
   still dips below the floor, only the goal of that foot rises.
 
-The IK backend (:func:`solve_ik`) solves for the joints that reach these goals, frame by
-frame. An RL backend such as ReActor tracks the same goals in simulation.
+The IK (:func:`solve_ik`) solves for the joints that reach these goals, frame by frame.
+ReActor tracks the same goals in simulation.
 """
 
 from typing import NamedTuple
@@ -29,10 +29,10 @@ import numpy as np
 from lite_description import get_mjcf_path
 from scipy.ndimage import uniform_filter1d
 
-from ..kinematics import Sole, lowest_points, quat_mul, sole_points
-from ..robots import FEET, body_id, joint_qpos_addr
-from ..sources.human import HUMAN_BODIES, HUMAN_PARENTS
-from ..store import FPS
+from ...kinematics import Sole, lowest_points, quat_mul, sole_points
+from ...robots import FEET, body_id, joint_qpos_addr
+from ...sources.human import HUMAN_BODIES, HUMAN_PARENTS
+from ...store import FPS
 
 #: Human body -> the Lite link at the joint that the body turns about. A toe has none.
 ANCHORS: dict[str, str] = {
@@ -102,8 +102,10 @@ _JOINT_SPEED: float = 20.0
 #: not jump when it changes the foot it stands on.
 _HEIGHT_WINDOW: int = 5
 
-#: Newton steps on the first frame, which starts from the T-pose and not from the frame before.
-_FIRST_FRAME_ITERS: int = 50
+#: Newton steps on the first frame, which starts from the T-pose and not from the frame before,
+#: and on each frame after it.
+_FIRST_FRAME_STEPS: int = 50
+_NEWTON_STEPS: int = 15
 
 
 class Calibration(NamedTuple):
@@ -233,13 +235,11 @@ def solve_ik(
     joint_names: tuple[str, ...],
     goal_pos: np.ndarray,
     goal_quat: np.ndarray,
-    iters: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Solve the IK of the floating-base ``model`` for the goals of :func:`goals`, per frame.
 
     Each frame starts from the solution of the frame before, so that the solution moves
-    continuously. ``iters`` is the number of Newton steps on each frame after the first. No
-    joint turns faster than :data:`_JOINT_SPEED` between two frames. Returns the base
+    continuously. No joint turns faster than :data:`_JOINT_SPEED` between two frames. Returns the base
     position ``(T, 3)``, the base rotation ``(T, 4)`` in wxyz, and the ``(T, J)`` joint
     positions in the order of ``joint_names``.
     """
@@ -266,7 +266,7 @@ def solve_ik(
     speed_limit = mink.VelocityLimit(model, dict.fromkeys(joint_names, _JOINT_SPEED))
     # The Newton steps of one frame add up to one frame, so that the speed limit holds
     # between frames.
-    step = 1.0 / (FPS * iters)
+    step = 1.0 / (FPS * _NEWTON_STEPS)
     joint_addrs = np.asarray([joint_qpos_addr(model, name) for name in joint_names])
 
     # The joints at zero are the T-pose. The posture task has no cost on the base, so its
@@ -287,9 +287,9 @@ def solve_ik(
             ))
         if t == 0:
             # The first frame moves from the T-pose in no time, so no speed limit applies.
-            dt, limits, newton_steps = 1.0, [position_limit], _FIRST_FRAME_ITERS
+            dt, limits, newton_steps = 1.0, [position_limit], _FIRST_FRAME_STEPS
         else:
-            dt, limits, newton_steps = step, [position_limit, speed_limit], iters
+            dt, limits, newton_steps = step, [position_limit, speed_limit], _NEWTON_STEPS
         for _ in range(newton_steps):
             velocity = mink.solve_ik(configuration, [*tasks, posture], dt, "daqp", damping=1e-1, limits=limits)
             configuration.integrate_inplace(velocity, dt)

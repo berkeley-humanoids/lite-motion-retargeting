@@ -1,29 +1,20 @@
 """The motion library: the robot layers of a store, end to end, as the environment reads them."""
 
-import re
 from pathlib import Path
 
 import numpy as np
 import torch
 from mjlab.utils.lab_api.math import quat_inv, quat_mul
 
-from .. import CACHE_ROOT
-from ..sources import SOURCES, clip_key, motion_name
-from ..store import FPS, read_robot_layer
-from .env_cfg import ROBOT, robot_joints
+from ...robots import joint_names, load_lite_model
+from ...sources import clips, motion_name
+from ...store import FPS, read_robot_layer
+from .env_cfg import ROBOT
 
 
 def motion_paths(source: str, clip: str | None, store: Path) -> list[Path]:
     """Return the robot layers in ``store`` of the clips of ``source`` that match ``clip``."""
-    spec = SOURCES[source]
-    clip_dir = CACHE_ROOT / source / spec.clip_dir
-    paths = [
-        store / ROBOT / f"{motion_name(source, clip_dir, path)}.rrd"
-        for path in sorted(clip_dir.glob(spec.clip_glob))
-        if clip is None or re.search(clip, clip_key(clip_dir, path))
-    ]
-    if not paths:
-        raise SystemExit(f"No clip in {clip_dir} matches {clip!r}.")
+    paths = [store / ROBOT / f"{motion_name(source, path)}.rrd" for path in clips(source, clip)]
     missing = [path for path in paths if not path.exists()]
     if missing:
         raise SystemExit(f"{len(missing)} of {len(paths)} motions are not in {store}. Run `uv run retarget`.")
@@ -42,7 +33,9 @@ def build_library(paths: list[Path], out: Path) -> Path:
     for path, motion in zip(paths, motions, strict=True):
         if motion["fps"] != FPS or motion["bodies"] != bodies:
             raise SystemExit(f"{path} is not at {FPS} Hz, or its goals differ from those of {paths[0].name}.")
-    joints = robot_joints(set().union(*(motion["active"] for motion in motions)))
+    # The joints of the simulated robot are in the order of the MJCF.
+    active = set().union(*(motion["active"] for motion in motions))
+    joints = tuple(name for name in joint_names(load_lite_model(ROBOT)) if name in active)
 
     joint_pos = [motion["joint_pos"][:, [motion["joint_names"].index(name) for name in joints]] for motion in motions]
     lengths = np.array([len(pos) for pos in joint_pos])

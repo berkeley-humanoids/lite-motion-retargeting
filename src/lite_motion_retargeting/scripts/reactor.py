@@ -1,6 +1,6 @@
 """Train ReActor on the motions of a store, or export the motions that it plays.
 
-``reactor/`` documents the method.
+``retargeting/reactor/`` documents the method.
 
 Usage:
     uv run --extra reactor reactor train --source lafan1bvh --clip '^walk'
@@ -21,10 +21,11 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
 from .. import DATASET_ROOT, REPO_ROOT
 from ..kinematics import planted
-from ..reactor.env_cfg import WRENCH_WEIGHT, agent_cfg, env_cfg
-from ..reactor.library import build_library, motion_paths
-from ..reactor.mdp import GoalCommandCfg, lost_track
-from ..retargeting import load_models, motion_metrics
+from ..retargeting import load_models
+from ..retargeting.metrics import motion_metrics
+from ..retargeting.reactor.env_cfg import agent_cfg, env_cfg
+from ..retargeting.reactor.library import build_library, motion_paths
+from ..retargeting.reactor.mdp import GoalCommandCfg, lost_track
 from ..robots import FEET, lite_urdf_path
 from ..store import BASE_LAYER, FPS, write_asset, write_blueprint, write_robot_layer
 
@@ -45,7 +46,6 @@ def train(
     num_envs: int = 4096,
     iterations: int = 10_000,
     warmstart: int = 1_000,
-    wrench_weight: float = WRENCH_WEIGHT,
     run_name: str = "",
 ) -> None:
     """Train the policy and the goal offsets on the motions of ``source`` in ``store``.
@@ -57,7 +57,6 @@ def train(
         num_envs: The number of parallel simulations.
         iterations: The number of PPO iterations.
         warmstart: The number of PPO iterations before the goal offsets start to learn.
-        wrench_weight: The penalty on the L1 norm of the root force and of the root torque.
         run_name: A suffix for the name of the run directory. The run directory also keeps
             these arguments, in ``train.json``.
     """
@@ -71,7 +70,7 @@ def train(
     print(f"{len(paths)} motions, {len(joints)} joints actuated -> {run}")
 
     goals = GoalCommandCfg(library=str(library), warmstart=warmstart, save_to=str(run / "goals.pt"))
-    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals, wrench_weight), device=DEVICE)
+    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals), device=DEVICE)
     runner = MjlabOnPolicyRunner(RslRlVecEnvWrapper(env), asdict(agent_cfg(iterations, run_name)), str(run), DEVICE)
     runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True)
     env.command_manager.get_term("goals").save(run / "goals.pt")
@@ -86,7 +85,7 @@ def export(run: Path, out: Path, checkpoint: str | None = None) -> None:
     from the IK solution of that frame, and the piece before it ends :data:`CUT_SECONDS`
     earlier. Export writes each piece of at least :data:`PIECE_SECONDS`. A motion that never
     lost track is one piece and keeps its name. Other pieces get the name
-    ``<name>_f<first frame>``. The metrics of ``retargeting.motion_metrics`` compare each piece
+    ``<name>_f<first frame>``. The metrics of ``retargeting.metrics.motion_metrics`` compare each piece
     with the learned goals. Four more metrics measure the wrench, in N and N m:
     ``wrench_force_max``, ``wrench_force_mean``, ``wrench_torque_max`` and
     ``wrench_torque_mean``. A high peak with a low mean is a short push.

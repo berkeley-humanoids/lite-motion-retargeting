@@ -2,8 +2,9 @@
 
 A human source, such as the LAFAN1 BVH takes, has a loader that returns a
 :class:`human.HumanClip`: the bodies of one shared human skeleton, which ``human.py``
-defines. A new human format needs only a reader into that skeleton. ``g1.py`` reads the
-G1 sources, which share one layout per frame.
+defines. A new human format needs only a reader into that skeleton: ``bvh.py`` reads BVH
+takes, and ``smplx.py`` reads SMPL-X clips. ``g1.py`` reads the G1 sources, which share one
+layout per frame.
 """
 
 import re
@@ -11,22 +12,18 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
+from .. import CACHE_ROOT
+from .bvh import SEED_ARCHIVE, load_lafan1_bvh, load_seed_bvh, unpack_seed
 from .g1 import (
-    Motion,
+    G1Clip,
     load_amass,
     load_kimodo,
     load_lafan1,
     load_motiondecode,
     unpack_kimodo,
 )
-from .human import (
-    SEED_ARCHIVE,
-    HumanClip,
-    load_amass_smplx,
-    load_lafan1_bvh,
-    load_seed_bvh,
-    unpack_seed,
-)
+from .human import HumanClip
+from .smplx import load_amass_smplx
 
 
 class Source(NamedTuple):
@@ -42,8 +39,8 @@ class Source(NamedTuple):
     #: directory. A motion gets its name from the path of its clip below this directory.
     clip_dir: str
     clip_glob: str
-    #: Reads one clip: a human clip, or a G1 clip with its rate in Hz.
-    load: Callable[[Path], HumanClip | tuple[Motion, int]]
+    #: Reads one clip.
+    load: Callable[[Path], HumanClip | G1Clip]
     #: The Hub dataset repo of the set, and the Hub glob patterns that ``uv run download``
     #: downloads from it by default.
     repo_id: str | None = None
@@ -158,13 +155,18 @@ SOURCES: dict[str, Source] = {
 }
 
 
-def clip_key(clip_dir: Path, path: Path) -> str:
+def clip_dir(source: str) -> Path:
+    """Return the directory of the clips of ``source`` in the cache."""
+    return CACHE_ROOT / source / SOURCES[source].clip_dir
+
+
+def clip_key(source: str, path: Path) -> str:
     """Return the path of a clip below the clip directory of its source, without the suffix."""
-    return path.relative_to(clip_dir).with_suffix("").as_posix()
+    return path.relative_to(clip_dir(source)).with_suffix("").as_posix()
 
 
-def motion_name(source: str, clip_dir: Path, path: Path) -> str:
-    """Name a motion ``<source>_<path of its clip below clip_dir>``.
+def motion_name(source: str, path: Path) -> str:
+    """Name a motion ``<source>_<clip key>``.
 
     Every run of characters other than letters and digits becomes ``_``. The full path, and
     not only the file name, keeps two takes with one name in two directories apart. AMASS
@@ -172,8 +174,26 @@ def motion_name(source: str, clip_dir: Path, path: Path) -> str:
     because AMASS CNRS has both ``-01_L_1`` and ``01_L_1``, and only the sign tells them
     apart.
     """
-    key = re.sub(r"(^|[/_ ])-(?=\d)", r"\1m", clip_key(clip_dir, path))
+    key = re.sub(r"(^|[/_ ])-(?=\d)", r"\1m", clip_key(source, path))
     return f"{source}_{re.sub(r'[^A-Za-z0-9]+', '_', key).strip('_')}"
+
+
+def clips(source: str, pattern: str | None = None) -> list[Path]:
+    """Return the clips of ``source`` in the cache whose :func:`clip_key` matches the regex ``pattern``.
+
+    Stops if the source is unknown, if no clip matches, or if two clips get one motion name.
+    """
+    if source not in SOURCES:
+        raise SystemExit(f"Unknown source {source!r}. Expected one of {sorted(SOURCES)}.")
+    paths = sorted(clip_dir(source).glob(SOURCES[source].clip_glob))
+    if pattern is not None:
+        paths = [path for path in paths if re.search(pattern, clip_key(source, path))]
+    if not paths:
+        raise SystemExit(f"No clip under {clip_dir(source)} matches {pattern!r}. Run `uv run download --source {source}`.")
+    names = [motion_name(source, path) for path in paths]
+    if len(set(names)) != len(names):
+        raise SystemExit(f"Two clips of {source} get one motion name.")
+    return paths
 
 
 def source_of(path: Path) -> str:

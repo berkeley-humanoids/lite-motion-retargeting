@@ -31,6 +31,7 @@ from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 
+from ...robots import load_lite_model
 from .mdp import (
     STEPS_PER_ITERATION,
     GoalCommandCfg,
@@ -71,20 +72,13 @@ def lite_spec(joints: tuple[str, ...]) -> mujoco.MjSpec:
     return spec
 
 
-def robot_joints(active: set[str]) -> tuple[str, ...]:
-    """Return the joints of ``active`` in the order of the MJCF, which is the order of the robot entity."""
-    model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(ROBOT)))
-    names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)]
-    return tuple(name for name in names if name in active)
-
-
 def pd_gains(joints: tuple[str, ...]) -> dict[str, tuple[float, float, float]]:
     """Return the stiffness, the damping and the effort limit of each of ``joints``.
 
     A joint keeps the armature and the effort limit of its actuator in the MJCF. Its gains
     come from :data:`NATURAL_FREQUENCY_HZ`, with a damping ratio of 2, as BeyondMimic sets them.
     """
-    model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(ROBOT)))
+    model = load_lite_model(ROBOT)
     omega = 2.0 * np.pi * NATURAL_FREQUENCY_HZ
     gains = {}
     for actuator in range(model.nu):
@@ -120,13 +114,8 @@ def robot_cfg(joints: tuple[str, ...]) -> EntityCfg:
 WRENCH_WEIGHT: float = 1e-2
 
 
-def env_cfg(
-    joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg, wrench_weight: float = WRENCH_WEIGHT
-) -> ManagerBasedRlEnvCfg:
-    """Return the environment. Its terms and their weights follow table 1 of the paper.
-
-    ``wrench_weight`` replaces :data:`WRENCH_WEIGHT`, to trade the wrench for failures.
-    """
+def env_cfg(joints: tuple[str, ...], num_envs: int, goals: GoalCommandCfg) -> ManagerBasedRlEnvCfg:
+    """Return the environment. Its terms and their weights follow table 1 of the paper."""
     observations = {
         "goals": ObservationTermCfg(func=goal_features),
         "joint_target_error": ObservationTermCfg(func=joint_target_error),
@@ -172,8 +161,8 @@ def env_cfg(
             "joint_acc": RewardTermCfg(func=joint_acc_l2, weight=-1e-6),
             "action_rate": RewardTermCfg(func=action_rate_l2, weight=-1e-2),
             "action_acc": RewardTermCfg(func=action_acc_l2, weight=-1e-2),
-            "wrench_force": RewardTermCfg(func=wrench_l1, weight=-wrench_weight, params={"part": "force"}),
-            "wrench_torque": RewardTermCfg(func=wrench_l1, weight=-wrench_weight, params={"part": "torque"}),
+            "wrench_force": RewardTermCfg(func=wrench_l1, weight=-WRENCH_WEIGHT, params={"part": "force"}),
+            "wrench_torque": RewardTermCfg(func=wrench_l1, weight=-WRENCH_WEIGHT, params={"part": "torque"}),
         },
         # In playback, export decides when an env resets.
         terminations={} if goals.playback else {

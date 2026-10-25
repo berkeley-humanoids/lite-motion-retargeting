@@ -35,20 +35,17 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
 
-import mujoco
 import numpy as np
-import pyarrow as pa
-from lite_description import get_mjcf_path
 from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-from . import CACHE_ROOT, DATASET_ROOT, SITE_ROOT
+from . import DATASET_ROOT, SITE_ROOT
 from .hub import VIEWER, layer_url
-from .retargeting.g1 import G1_DRIVEN
-from .robots import lite_urdf_path
-from .sources import SOURCES, clip_key, motion_name, source_of
-from .store import BASE_LAYER
+from .retargeting.ik.g1 import G1_DRIVEN
+from .robots import joint_names, lite_urdf_path, load_lite_model
+from .sources import SOURCES, clip_dir, clip_key, motion_name, source_of
+from .store import BASE_LAYER, read_robot_layer
 
 SITE_DATA: Path = SITE_ROOT / "data"
 
@@ -77,6 +74,7 @@ ROBOTS: dict[str, str] = {
     "lite": "Lite",
     "lite_pro": "Lite Pro",
 }
+
 
 def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     """Write ``site/data/`` from the robot layer of ``dataset/``.
@@ -111,7 +109,7 @@ def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     mesh_mb = write_robot(urdf, out)
 
     clips = {source: clip_paths(source) for source in sources}
-    joint_names: list[str] = []
+    layer_joints: list[str] = []
     # Each set maps to its position, in the order that the motions first use it.
     joint_sets: dict[tuple[int, ...], int] = {}
     active_sets: dict[tuple[int, ...], int] = {}
@@ -121,9 +119,9 @@ def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
         exported = pool.map(partial(export_motion, robot=robot), paths, chunksize=16)
         for path, entry in tqdm(zip(paths, exported, strict=True), total=len(paths), unit="motion"):
             names = entry.pop("joint_names")
-            if not joint_names:
-                joint_names = names
-            if names != joint_names:
+            if not layer_joints:
+                layer_joints = names
+            if names != layer_joints:
                 raise SystemExit(f"{path}: its joints differ from the joints of the other motions.")
             joints, active = entry.pop("joints"), entry.pop("active")
             rows, preview = entry.pop("rows"), entry.pop("preview")
@@ -144,15 +142,15 @@ def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     index = {
         "robot": robot,
         "viewer": VIEWER,
-        "joint_names": joint_names,
+        "joint_names": layer_joints,
         "joint_sets": list(joint_sets),
         "active_sets": list(active_sets),
         "groups": [
-            {"title": title, "joints": [i for i, name in enumerate(joint_names) if re.fullmatch(pattern, name)]}
+            {"title": title, "joints": [i for i, name in enumerate(layer_joints) if re.fullmatch(pattern, name)]}
             for title, pattern in GROUPS.items()
         ],
         "robots": [
-            {"title": title, "joints": [joint_names.index(name) for name in robot_joints(variant)]}
+            {"title": title, "joints": [layer_joints.index(name) for name in joint_names(load_lite_model(variant))]}
             for variant, title in ROBOTS.items()
         ],
         "packs": packs.names,
@@ -216,7 +214,14 @@ def export_motion(path: Path, robot: str) -> dict:
     the joints that move, and ``active`` lists the joints that the source drives, both as
     positions in ``joint_names``.
     """
-    fps, names, active, rows = read_robot_layer(path, robot)
+    layer = read_robot_layer(path, robot)
+    fps, names = int(layer["fps"]), list(layer["joint_names"])
+    # A layer older than its active_joint_names comes from a G1 source.
+    active = layer["active"] or G1_DRIVEN
+    # The pelvis goal is the base where the retarget placed the robot. The page takes the
+    # rotation as xyzw, the three.js order.
+    pelvis = layer["bodies"].index("pelvis")
+    rows = np.hstack([layer["goal_pos"][:, pelvis], layer["goal_quat"][:, pelvis, [1, 2, 3, 0]], layer["joint_pos"]])
     # A joint that stays at zero, such as a finger, adds bytes and no motion.
     moving = np.flatnonzero(np.abs(rows[:, 7:]).max(axis=0) > 0.0)
     rows = np.hstack([rows[:, :7], rows[:, 7 + moving]])
@@ -243,53 +248,6 @@ def export_motion(path: Path, robot: str) -> dict:
     }
 
 
-def read_robot_layer(path: Path, robot: str) -> tuple[int, list[str], list[str], np.ndarray]:
-    """Read the rate, joint names, driven joints and ``(T, 7 + J)`` rows of a robot layer.
-
-    The pelvis pose comes from the pelvis goal, which is the base where the retarget placed
-    the robot. Thus the pose is exactly where the joint chain in the file puts the root. A
-    layer without ``active_joint_names`` is older than that property. Such a layer comes
-    from a G1 source, so it drives the G1 joints.
-    """
-    positions = f"/{robot}/joint/positions"
-    pelvis = f"/{robot}/goal/poses/pelvis"
-    columns: dict[str, list[pa.RecordBatch]] = {}
-    joint_names, active, fps = None, None, None
-    for chunk in RrdReader(path).stream():
-        entity = chunk.entity_path
-        if entity == f"/__properties/{robot}":
-            properties = chunk.to_record_batch().to_pydict()
-            joint_names, fps = properties["joint_names"][0], properties["fps"][0][0]
-            active = properties.get("active_joint_names", [G1_DRIVEN])[0]
-        elif entity in (positions, pelvis):
-            columns.setdefault(entity, []).append(chunk.to_record_batch())
-    if joint_names is None:
-        raise SystemExit(f"{path}: no /__properties/{robot}, so the file is not a robot layer.")
-
-    def values(entity: str, component: str, width: int) -> np.ndarray:
-        table = pa.Table.from_batches(columns[entity]).sort_by("frame")
-        flat = table.column(component).combine_chunks().flatten()
-        if pa.types.is_fixed_size_list(flat.type):
-            flat = flat.flatten()
-        return flat.to_numpy().astype(np.float32).reshape(-1, width)
-
-    rows = np.hstack([
-        values(pelvis, "Transform3D:translation", 3),
-        values(pelvis, "Transform3D:quaternion", 4),
-        values(positions, "Scalars:scalars", len(joint_names)),
-    ])
-    return int(fps), list(joint_names), list(active), rows
-
-
-def robot_joints(variant: str) -> list[str]:
-    """Return the joint names of a Lite variant from its MJCF, without the free joint."""
-    model = mujoco.MjModel.from_xml_path(str(get_mjcf_path(variant)))
-    return [
-        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint)
-        for joint in range(model.njnt) if model.jnt_type[joint] != mujoco.mjtJoint.mjJNT_FREE
-    ]
-
-
 def read_source_fps(path: Path) -> int | None:
     """Return the rate of the source clip from its base layer, or None if the store has none."""
     if not path.exists():
@@ -306,11 +264,9 @@ def clip_paths(source: str) -> dict[str, str]:
     A motion name flattens the path of its clip, so only the downloaded source keeps the
     folders that give the category. The map leaves out each clip that is not in the cache.
     """
-    spec = SOURCES[source]
-    clip_dir = CACHE_ROOT / source / spec.clip_dir
     return {
-        motion_name(source, clip_dir, path): clip_key(clip_dir, path)
-        for path in clip_dir.glob(spec.clip_glob)
+        motion_name(source, path): clip_key(source, path)
+        for path in clip_dir(source).glob(SOURCES[source].clip_glob)
     }
 
 

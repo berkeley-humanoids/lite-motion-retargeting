@@ -22,8 +22,7 @@ from huggingface_hub import snapshot_download
 
 from .. import CACHE_ROOT
 from ..robots import G1_REPO_ID, G1_URDF_PATH
-from ..sources import SOURCES
-from ..sources.human import HumanClip
+from ..sources import SOURCES, clip_dir, clips
 
 #: The number of files that download in parallel. AMASS and MotionDecode have tens of
 #: thousands of small files, so the time per request, not the bandwidth, sets the download
@@ -44,8 +43,8 @@ def download(source: str = "lafan1", include: list[str] | None = None, force: bo
     spec = SOURCES[source]
     local_path = CACHE_ROOT / source
     if spec.repo_id is None and spec.zip_url is None:
-        raise SystemExit(f"{spec.title} has no public download. Copy its clips to {local_path / spec.clip_dir} "
-                         f"yourself, from {spec.page}.")
+        raise SystemExit(f"{spec.title} has no public download. Copy its clips to {clip_dir(source)} yourself, "
+                         f"from {spec.page}.")
 
     snapshot_download(
         repo_id=G1_REPO_ID,
@@ -61,7 +60,7 @@ def download(source: str = "lafan1", include: list[str] | None = None, force: bo
             local_path.mkdir(parents=True, exist_ok=True)
             urllib.request.urlretrieve(spec.zip_url, archive)
         with zipfile.ZipFile(archive) as files:
-            files.extractall(local_path / spec.clip_dir)
+            files.extractall(clip_dir(source))
     else:
         snapshot_download(
             repo_id=spec.repo_id,
@@ -74,18 +73,8 @@ def download(source: str = "lafan1", include: list[str] | None = None, force: bo
     if spec.unpack is not None:
         spec.unpack(local_path)
 
-    clips = sorted((local_path / spec.clip_dir).glob(spec.clip_glob))
-    if not clips:
-        raise SystemExit(f"No clips under {local_path / spec.clip_dir} (include={include}).")
-    loaded = spec.load(clips[0])
-    if isinstance(loaded, HumanClip):
-        frames, fps = loaded.pos.shape[0], loaded.fps
-    else:
-        frames, fps = loaded[0]["base_pos"].shape[0], loaded[1]
     print(f"G1 model → {G1_URDF_PATH}")
-    print(f"{source} → {local_path}")
-    print(f"  clips  : {len(clips)}")
-    print(f"  sample : {clips[0].relative_to(local_path)}  ({frames} frames @ {fps} Hz)")
+    print(f"{source} → {local_path}: {len(clips(source))} clips")
 
 
 def main() -> None:

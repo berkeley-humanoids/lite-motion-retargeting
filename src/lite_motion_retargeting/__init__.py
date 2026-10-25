@@ -5,8 +5,7 @@ command: ``uv run retarget`` runs ``scripts/retarget.py``. The other modules are
 library that the steps share:
 
     sources/       the motion sets, a loader for each, and the human skeleton
-    retargeting/   one clip to a Lite motion: the G1 path, the human path, the metrics
-    reactor/       ReActor, the mjlab environment that retargets in physics
+    retargeting/   the methods that retarget a clip, IK, ReActor and UMR, and the metrics
     robots.py      the Lite and G1 models
     kinematics.py  resampling, forward kinematics, soles and foot contacts
     store.py       the layers of a motion, as Rerun files
@@ -17,7 +16,7 @@ Conventions:
 - Quaternions are scalar-first wxyz, unit-norm, with ``w >= 0``. A source file can store
   xyzw, and its loader in ``sources/`` converts it exactly once.
 - MuJoCo sets the column order of the Lite ``joint_pos`` from the MJCF
-  (:func:`robots.lite_joint_names`). No code hardcodes it.
+  (:func:`robots.joint_names`). No code hardcodes it.
 """
 
 from pathlib import Path

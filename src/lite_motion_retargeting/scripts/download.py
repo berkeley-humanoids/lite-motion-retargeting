@@ -23,7 +23,6 @@ from huggingface_hub import snapshot_download
 from .. import CACHE_ROOT
 from ..robots import G1_REPO_ID, G1_URDF_PATH
 from ..sources import SOURCES, clip_dir, clips
-from ..sources.human import HumanClip
 
 #: The number of files that download in parallel. AMASS and MotionDecode have tens of
 #: thousands of small files, so the time per request, not the bandwidth, sets the download
@@ -74,16 +73,8 @@ def download(source: str = "lafan1", include: list[str] | None = None, force: bo
     if spec.unpack is not None:
         spec.unpack(local_path)
 
-    paths = clips(source)
-    loaded = spec.load(paths[0])
-    if isinstance(loaded, HumanClip):
-        frames, fps = loaded.pos.shape[0], loaded.fps
-    else:
-        frames, fps = loaded[0]["base_pos"].shape[0], loaded[1]
     print(f"G1 model → {G1_URDF_PATH}")
-    print(f"{source} → {local_path}")
-    print(f"  clips  : {len(paths)}")
-    print(f"  sample : {paths[0].relative_to(local_path)}  ({frames} frames @ {fps} Hz)")
+    print(f"{source} → {local_path}: {len(clips(source))} clips")
 
 
 def main() -> None:

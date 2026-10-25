@@ -2,9 +2,8 @@
 
 Each method writes its motions in its own form. ``uv run retarget`` writes the IK store, and
 ``reactor export`` writes a store in which a motion can be cut into pieces. UMR writes
-``<clip>_<robot>.npz`` into a folder named after its robot, as the README shows. This step
-reads the base and the joints of each method, and measures them with
-``retargeting.metrics.motion_samples``.
+``<clip>_<robot>.npz`` into a folder named after its robot. This step reads the base and
+the joints of each method, and measures them with ``retargeting.metrics.motion_samples``.
 
 The metrics that a store keeps do not compare across methods. The IK measures the foot slide
 on the frames where the source plants a foot, and ``reactor export`` on the frames where its
@@ -15,22 +14,10 @@ The tables pool the samples of every piece: a mean is over every sample, and a m
 percentile too. Thus a long motion counts more than a short one, a motion with no contact
 adds no slide, and the cut of a motion into pieces changes nothing.
 
-Three metrics compare a motion with its source, whatever the method aims for:
-
-* ``limb_angle_deg``: the angle between each limb of the robot, such as the thigh, and the
-  same limb of the source. The source limb is the goal of ``human.goals`` before
-  ``human.plant`` moves it. Only a human source has these goals.
-* ``root_error_cm``: how far the horizontal move of the root over :data:`ROOT_WINDOW`
-  differs from that of the source root, which ``human.goals`` scales to Lite.
-* ``contact_iou``: where the sole of the robot is near the floor, against where the source
-  stands, as the intersection over the union of the two.
-
-UMR can place a motion in a world of its own. For LAFAN1, ``lafan_to_smplx`` turns the BVH
-axes into (x, -z, y), and ``sources/bvh.py`` into (z, x, y), so the world of UMR is that
-of the IK turned by -90 degrees about z. AMASS SMPL-X reaches UMR and the IK in its own
-world. This step turns a UMR motion by the angle of its source in :data:`UMR_TURNS`, and
-shifts it by one offset per motion. A fit of the turn would hide an error of heading, and a
-fit per frame would hide a drift.
+Three metrics compare a motion with its source, whatever the method aims for: the
+``limb_angle_deg`` and the ``root_error_cm`` of ``retargeting.metrics.fidelity``, and the
+``contact_iou`` of where the sole of the robot is near the floor against where the source
+stands. ``retargeting.umr.read_umr`` moves a UMR motion into the world of the IK.
 
 UMR scales the human by its height, not by the height of its pelvis as the IK does. Thus a
 UMR link is not where the goal of the IK is, and this step leaves out the goal errors of
@@ -54,14 +41,14 @@ from pathlib import Path
 
 import numpy as np
 import tyro
-from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
 from .. import DATASET_ROOT
-from ..kinematics import planted, quat_mul, resample_motion, resample_poses
+from ..kinematics import planted, resample_poses
 from ..retargeting import Models, human_planted, load_models
 from ..retargeting.ik.human import calibrate, goals
-from ..retargeting.metrics import motion_samples, summarize
+from ..retargeting.metrics import contact_iou, fidelity, motion_samples, statistic, summarize
+from ..retargeting.umr import UMR_TURNS, read_umr, umr_model, umr_path
 from ..robots import FEET, lite_model_hash
 from ..sources import SOURCES, clip_key, clips, motion_name
 from ..sources.human import HumanClip
@@ -69,24 +56,6 @@ from ..store import FPS, read_robot_layer
 
 #: The robot layer that every method writes.
 ROBOT: str = "lite_pro"
-
-#: The limbs that ``limb_angle_deg`` compares, as pairs of links.
-LIMBS: tuple[tuple[str, str], ...] = (
-    ("left_hip_yaw", "left_knee_pitch"),
-    ("left_knee_pitch", "left_foot"),
-    ("right_hip_yaw", "right_knee_pitch"),
-    ("right_knee_pitch", "right_foot"),
-    ("left_shoulder_yaw", "left_elbow_pitch"),
-    ("left_elbow_pitch", "left_hand"),
-    ("right_shoulder_yaw", "right_elbow_pitch"),
-    ("right_elbow_pitch", "right_hand"),
-)
-
-#: Source -> the turn about z, in rad, from the world of a UMR motion to the world of the IK.
-UMR_TURNS: dict[str, float] = {"lafan1bvh": np.pi / 2, "amassx": 0.0}
-
-#: s. ``root_error_cm`` compares the move of the root over this time.
-ROOT_WINDOW: float = 1.0
 
 #: The rows of a table: a label, the samples, and how to sum them up.
 ROWS: tuple[tuple[str, str, str], ...] = (
@@ -111,43 +80,6 @@ ROWS: tuple[tuple[str, str, str], ...] = (
 #: The samples that compare a motion with the goals of the IK.
 GOAL_KEYS: tuple[str, ...] = ("foot_error_cm", "foot_angle_deg", "hand_error_cm", "hand_angle_deg")
 
-#: The other samples that ``retargeting.metrics.summarize`` needs.
-SUMMARY_KEYS: tuple[str, ...] = (
-    "foot_slide_cm_s", "near_floor_slide_cm_s", "planted_gap_cm", "penetration_cm", "joint_speed",
-)
-
-
-def _yaw(quat: np.ndarray) -> np.ndarray:
-    """Return the heading of each wxyz rotation, in rad."""
-    return Rotation.from_quat(quat[:, [1, 2, 3, 0]]).as_euler("ZYX")[:, 0]
-
-
-def read_umr(
-    path: Path, joint_names: tuple[str, ...], ref_pos: np.ndarray, ref_quat: np.ndarray, turn: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Read one motion of UMR at :data:`store.FPS`, and move it into the world of the IK.
-
-    ``ref_pos`` and ``ref_quat`` are the base of the IK. The motion turns by ``turn`` rad
-    about z, and the shift puts the mean of the two roots together. Returns the
-    base, the joints of ``joint_names``, and the median heading of the UMR base from the IK
-    base after the turn, in degrees.
-    """
-    data = np.load(path, allow_pickle=True)
-    qpos = data["qpos"].astype(np.float64)
-    names = [str(name) for name in data["robot_joint_names"]]
-    columns = [7 + names.index(name) for name in joint_names]
-    motion = resample_motion(
-        {"base_pos": qpos[:, :3], "base_quat_wxyz": qpos[:, 3:7], "g1_joint_pos": qpos[:, columns]},
-        round(float(data["fps"][0])),
-        FPS,
-    )
-    pos = Rotation.from_euler("z", turn).apply(motion["base_pos"])
-    quat = quat_mul(np.array([np.cos(turn / 2), 0.0, 0.0, np.sin(turn / 2)]), motion["base_quat_wxyz"])
-    n = min(len(pos), len(ref_pos))
-    pos[:, :2] += (ref_pos[:n, :2] - pos[:n, :2]).mean(axis=0)
-    heading = np.degrees(np.angle(np.median(np.exp(1j * (_yaw(quat[:n]) - _yaw(ref_quat[:n]))))))
-    return pos, quat, motion["g1_joint_pos"], float(heading)
-
 
 def reactor_pieces(folder: Path, name: str) -> list[tuple[str, int, dict]]:
     """Return the pieces of motion ``name`` in the ReActor store ``folder``, with their first frames."""
@@ -157,31 +89,6 @@ def reactor_pieces(folder: Path, name: str) -> list[tuple[str, int, dict]]:
         if match:
             pieces.append((path.stem, int(match.group(1) or 0), read_robot_layer(path, ROBOT)))
     return pieces
-
-
-def fidelity(
-    link_pos: np.ndarray, base_pos: np.ndarray, links: tuple[str, ...], ref_pos: np.ndarray | None
-) -> dict[str, np.ndarray]:
-    """Return the samples of ``limb_angle_deg`` and ``root_error_cm`` of one motion.
-
-    ``link_pos`` ``(T, P, 3)`` is where the robot puts ``links``, and ``ref_pos`` the goals
-    of the source before planting, or None for a source with no such goals.
-    """
-    if ref_pos is None:
-        return {"limb_angle_deg": np.zeros(0), "root_error_cm": np.zeros(0)}
-    pairs = [(links.index(a), links.index(b)) for a, b in LIMBS if a in links and b in links]
-    robot = np.stack([link_pos[:, b] - link_pos[:, a] for a, b in pairs], axis=1)
-    source = np.stack([ref_pos[:, b] - ref_pos[:, a] for a, b in pairs], axis=1)
-    cos = np.sum(robot * source, axis=-1) / (
-        np.linalg.norm(robot, axis=-1) * np.linalg.norm(source, axis=-1)
-    )
-    window = round(ROOT_WINDOW * FPS)
-    move = base_pos[window:, :2] - base_pos[:-window, :2]
-    ref_move = ref_pos[window:, 0, :2] - ref_pos[:-window, 0, :2]
-    return {
-        "limb_angle_deg": np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))).ravel(),
-        "root_error_cm": np.linalg.norm(move - ref_move, axis=-1) * 100.0,
-    }
 
 
 _MODELS: Models | None = None
@@ -252,34 +159,14 @@ def _worker_measure(job: tuple[str, Path, str, Path, Path | None, Path | None]) 
             samples["planted"] = mask[span]
             if method == "umr":
                 samples = {k: v for k, v in samples.items() if k not in GOAL_KEYS}
-            summary = summarize({k: samples.get(k, np.zeros(0)) for k in (*GOAL_KEYS, *SUMMARY_KEYS)})
-            summary |= {
-                "limb_angle_deg": _stat(samples["limb_angle_deg"], "mean"),
-                "root_error_cm": _stat(samples["root_error_cm"], "mean"),
-                "contact_iou": _iou(samples["near_floor"], samples["planted"]),
+            summary = summarize(samples) | {
+                "limb_angle_deg": statistic(samples["limb_angle_deg"], "mean"),
+                "root_error_cm": statistic(samples["root_error_cm"], "mean"),
+                "contact_iou": contact_iou(samples["near_floor"], samples["planted"]),
             }
             row["methods"][method] = {"samples": samples, "summary": summary}
         rows.append(row)
     return rows
-
-
-def _stat(values: np.ndarray, how: str) -> float:
-    """Return the mean, median, or a percentile of ``values``, or NaN if there are none."""
-    if values.size == 0:
-        return float("nan")
-    if how == "mean":
-        return float(values.mean())
-    if how == "median":
-        return float(np.median(values))
-    if how == "max":
-        return float(values.max())
-    return float(np.percentile(values, int(how[1:])))
-
-
-def _iou(near: np.ndarray, planted: np.ndarray) -> float:
-    """Return the intersection over the union of two masks, in percent."""
-    union = (near | planted).sum()
-    return float((near & planted).sum() / union * 100.0) if union else float("nan")
 
 
 def print_table(title: str, rows: list[dict], methods: list[str]) -> None:
@@ -298,9 +185,9 @@ def print_table(title: str, rows: list[dict], methods: list[str]) -> None:
             if how == "share":
                 value = float(values.mean() * 100.0)
             elif how == "iou":
-                value = _iou(values, np.concatenate([part["planted"] for part in parts]))
+                value = contact_iou(values, np.concatenate([part["planted"] for part in parts]))
             else:
-                value = _stat(values, how)
+                value = statistic(values, how)
             cells.append(f"{value:10.2f}" if np.isfinite(value) else f"{'-':>10}")
         print(f"  {label:<40}" + "".join(cells))
 
@@ -310,9 +197,7 @@ def check_models(rows: list[dict], umr: Path | None) -> None:
     installed = lite_model_hash()
     seen = {(method, model) for row in rows for method, model in row["models"].items()}
     if umr is not None:
-        manifest = umr / "manifest.json"
-        model = json.loads(manifest.read_text())["robot_model"] if manifest.exists() else None
-        seen.add(("umr", model))
+        seen.add(("umr", umr_model(umr)))
     wrong = sorted({(method, model) for method, model in seen if model is not None and model != installed})
     if wrong:
         raise SystemExit(f"The installed Lite is {installed}, but these methods used another model: {wrong}.")
@@ -352,8 +237,7 @@ def compare(
     if umr is not None:
         if source not in UMR_TURNS:
             raise SystemExit(f"The world of a UMR motion of {source} is unknown. Add its turn to UMR_TURNS.")
-        # UMR names a motion after its input file and its robot, and SMPL-X files keep the clip names.
-        jobs = [(*job[:5], umr / f"{clip_key(source, job[1])}_{umr.name}.npz") for job in jobs]
+        jobs = [(*job[:5], umr_path(umr, clip_key(source, job[1]))) for job in jobs]
         jobs = [job for job in jobs if job[5].exists()]
         print(f"UMR has {len(jobs)} of {len(paths)} clips in {umr}.")
     if not jobs:

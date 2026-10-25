@@ -1,4 +1,6 @@
-"""Measure a retargeted motion: how well it tracks its goals, and how it treats the floor."""
+"""Measure a retargeted motion: how well it tracks its goals, how it treats the floor, and how
+close it stays to its source.
+"""
 
 from typing import TYPE_CHECKING
 
@@ -14,6 +16,37 @@ if TYPE_CHECKING:
 
 #: m. A sole point this close to the floor is near it, for ``near_floor_slide_cm_s``.
 CONTACT_GAP: float = 0.01
+
+#: Metric of :func:`motion_metrics` -> the samples of :func:`motion_samples` that it sums up,
+#: and the :func:`statistic` that sums them up.
+SUMMARY: dict[str, tuple[str, str]] = {
+    "foot_error_cm": ("foot_error_cm", "mean"),
+    "foot_angle_deg": ("foot_angle_deg", "mean"),
+    "hand_error_cm": ("hand_error_cm", "mean"),
+    "hand_angle_deg": ("hand_angle_deg", "mean"),
+    "foot_slide_cm_s": ("foot_slide_cm_s", "mean"),
+    "foot_slide_median_cm_s": ("foot_slide_cm_s", "median"),
+    "near_floor_slide_cm_s": ("near_floor_slide_cm_s", "mean"),
+    "near_floor_slide_median_cm_s": ("near_floor_slide_cm_s", "median"),
+    "planted_gap_cm": ("planted_gap_cm", "mean"),
+    "penetration_cm": ("penetration_cm", "p95"),
+    "joint_speed_max": ("joint_speed", "max"),
+}
+
+#: The limbs that ``limb_angle_deg`` compares, as pairs of links.
+LIMBS: tuple[tuple[str, str], ...] = (
+    ("left_hip_yaw", "left_knee_pitch"),
+    ("left_knee_pitch", "left_foot"),
+    ("right_hip_yaw", "right_knee_pitch"),
+    ("right_knee_pitch", "right_foot"),
+    ("left_shoulder_yaw", "left_elbow_pitch"),
+    ("left_elbow_pitch", "left_hand"),
+    ("right_shoulder_yaw", "right_elbow_pitch"),
+    ("right_elbow_pitch", "right_hand"),
+)
+
+#: s. ``root_error_cm`` compares the move of the root over this time.
+ROOT_WINDOW: float = 1.0
 
 
 def motion_samples(
@@ -79,29 +112,10 @@ def motion_samples(
 def summarize(samples: dict[str, np.ndarray]) -> dict[str, float]:
     """Return the metrics of :func:`motion_metrics` from the samples of :func:`motion_samples`.
 
-    A metric over an empty set, such as the slide of a motion that never touches the floor,
-    is NaN, not 0.
+    A metric over no samples, such as the slide of a motion that never touches the floor, is
+    NaN, not 0. So is a metric whose samples are missing, such as a goal error of UMR.
     """
-
-    def mean(key: str) -> float:
-        return float(samples[key].mean()) if samples[key].size else float("nan")
-
-    def median(key: str) -> float:
-        return float(np.median(samples[key])) if samples[key].size else float("nan")
-
-    return {
-        "foot_error_cm": mean("foot_error_cm"),
-        "foot_angle_deg": mean("foot_angle_deg"),
-        "hand_error_cm": mean("hand_error_cm"),
-        "hand_angle_deg": mean("hand_angle_deg"),
-        "foot_slide_cm_s": mean("foot_slide_cm_s"),
-        "foot_slide_median_cm_s": median("foot_slide_cm_s"),
-        "near_floor_slide_cm_s": mean("near_floor_slide_cm_s"),
-        "near_floor_slide_median_cm_s": median("near_floor_slide_cm_s"),
-        "planted_gap_cm": mean("planted_gap_cm"),
-        "penetration_cm": float(np.percentile(samples["penetration_cm"], 95)),
-        "joint_speed_max": float(samples["joint_speed"].max()),
-    }
+    return {metric: statistic(samples.get(key, np.zeros(0)), how) for metric, (key, how) in SUMMARY.items()}
 
 
 def motion_metrics(
@@ -141,3 +155,60 @@ def motion_metrics(
     return summarize(motion_samples(
         models, base_pos, base_quat, joint_pos, goal_links, goal_pos, goal_quat, feet_planted
     ))
+
+
+def statistic(values: np.ndarray, how: str) -> float:
+    """Return the ``mean``, ``median`` or ``max`` of ``values``, or the percentile ``p<n>``.
+
+    The statistic of no values is NaN.
+    """
+    if values.size == 0:
+        return float("nan")
+    if how == "mean":
+        return float(values.mean())
+    if how == "median":
+        return float(np.median(values))
+    if how == "max":
+        return float(values.max())
+    return float(np.percentile(values, int(how[1:])))
+
+
+def contact_iou(near: np.ndarray, planted: np.ndarray) -> float:
+    """Return the intersection over the union of two masks, in percent, or NaN if both are empty.
+
+    ``near`` is where the sole of the robot is near the floor, and ``planted`` where the
+    source stands.
+    """
+    union = (near | planted).sum()
+    return float((near & planted).sum() / union * 100.0) if union else float("nan")
+
+
+def fidelity(
+    link_pos: np.ndarray, base_pos: np.ndarray, links: tuple[str, ...], ref_pos: np.ndarray | None
+) -> dict[str, np.ndarray]:
+    """Return the samples that compare a motion with its source, whatever the method aims for.
+
+    ``link_pos`` ``(T, P, 3)`` is where the robot puts ``links``, and ``ref_pos`` the goals of
+    ``ik.human.goals`` before ``ik.human.plant`` moves them, or None for a source with no
+    such goals, such as a G1 source:
+
+    * ``limb_angle_deg``: the angle between each limb of :data:`LIMBS` and the same limb of
+      the source.
+    * ``root_error_cm``: how far the horizontal move of the root over :data:`ROOT_WINDOW`
+      differs from that of the source root, which ``ik.human.goals`` scales to Lite.
+    """
+    if ref_pos is None:
+        return {"limb_angle_deg": np.zeros(0), "root_error_cm": np.zeros(0)}
+    pairs = [(links.index(a), links.index(b)) for a, b in LIMBS if a in links and b in links]
+    robot = np.stack([link_pos[:, b] - link_pos[:, a] for a, b in pairs], axis=1)
+    source = np.stack([ref_pos[:, b] - ref_pos[:, a] for a, b in pairs], axis=1)
+    cos = np.sum(robot * source, axis=-1) / (
+        np.linalg.norm(robot, axis=-1) * np.linalg.norm(source, axis=-1)
+    )
+    window = round(ROOT_WINDOW * FPS)
+    move = base_pos[window:, :2] - base_pos[:-window, :2]
+    ref_move = ref_pos[window:, 0, :2] - ref_pos[:-window, 0, :2]
+    return {
+        "limb_angle_deg": np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))).ravel(),
+        "root_error_cm": np.linalg.norm(move - ref_move, axis=-1) * 100.0,
+    }

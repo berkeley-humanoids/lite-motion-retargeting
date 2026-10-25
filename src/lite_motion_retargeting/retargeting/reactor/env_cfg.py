@@ -31,7 +31,7 @@ from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 
-from ..robots import load_lite_model
+from ...robots import load_lite_model
 from .mdp import (
     STEPS_PER_ITERATION,
     GoalCommandCfg,

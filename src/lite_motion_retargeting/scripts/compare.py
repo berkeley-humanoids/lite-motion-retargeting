@@ -4,7 +4,7 @@ Each method writes its motions in its own form. ``uv run retarget`` writes the I
 ``reactor export`` writes a store in which a motion can be cut into pieces. UMR writes
 ``<clip>_<robot>.npz`` into a folder named after its robot, as the README shows. This step
 reads the base and the joints of each method, and measures them with
-``retargeting.motion_samples``.
+``retargeting.metrics.motion_samples``.
 
 The metrics that a store keeps do not compare across methods. The IK measures the foot slide
 on the frames where the source plants a foot, and ``reactor export`` on the frames where its
@@ -59,8 +59,9 @@ from tqdm import tqdm
 
 from .. import DATASET_ROOT
 from ..kinematics import planted, quat_mul, resample_motion, resample_poses
-from ..retargeting import Models, human_planted, load_models, motion_samples, summarize
-from ..retargeting.human import calibrate, goals
+from ..retargeting import Models, human_planted, load_models
+from ..retargeting.ik.human import calibrate, goals
+from ..retargeting.metrics import motion_samples, summarize
 from ..robots import FEET, lite_model_hash
 from ..sources import SOURCES, clip_key, clips, motion_name
 from ..sources.human import HumanClip
@@ -110,7 +111,7 @@ ROWS: tuple[tuple[str, str, str], ...] = (
 #: The samples that compare a motion with the goals of the IK.
 GOAL_KEYS: tuple[str, ...] = ("foot_error_cm", "foot_angle_deg", "hand_error_cm", "hand_angle_deg")
 
-#: The other samples that ``retargeting.summarize`` needs.
+#: The other samples that ``retargeting.metrics.summarize`` needs.
 SUMMARY_KEYS: tuple[str, ...] = (
     "foot_slide_cm_s", "near_floor_slide_cm_s", "planted_gap_cm", "penetration_cm", "joint_speed",
 )

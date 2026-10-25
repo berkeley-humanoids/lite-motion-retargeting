@@ -224,8 +224,7 @@ modules are the library that the steps share:
 |---|---|
 | `scripts/` | A module per command: `download.py`, `retarget.py`, `reactor.py`, `compare.py`, `build_site.py`, `serve.py` and `publish.py`. `pyproject.toml` lists the commands. |
 | `sources/` | Defines the sources and the rule that names a motion. `g1.py` reads the G1 sources. `human.py` defines the human skeleton that every human source maps onto, and reads LAFAN1 BVH files. |
-| `retargeting/` | Retargets one clip, grounds it, and measures it. `g1.py` is the G1 path. `human.py` builds the goal of each Lite link from a human pose, plants the feet, and solves the IK that reaches the goals. |
-| `reactor/` | The mjlab environment of ReActor: its terms in `mdp.py`, its configs in `env_cfg.py`, and the motions that it reads in `library.py`. See [ReActor](#reactor). |
+| `retargeting/` | The methods, and `metrics.py`, which measures a motion of any of them. `ik/` retargets one clip by IK: `g1.py` is the G1 path, and `human.py` builds the goal of each Lite link from a human pose, plants the feet, and solves the IK. `reactor/` is the mjlab environment of ReActor. See [ReActor](#reactor). `umr/` runs [UMR](#umr). |
 | `robots.py` | Loads the Lite and G1 models, and names their joints and bodies. |
 | `kinematics.py` | Resampling, forward kinematics, the soles, and foot contacts. |
 | `store.py` | Defines the file format, and reads a robot layer back. |
@@ -283,15 +282,15 @@ human path or the G1 path.
    knees, feet, toes, waist, chest, neck, head, shoulders, elbows and hands. Each rotation
    is rest-normalized: it is identity when the body stands in a T-pose that faces +x.
    Thus, a new format needs only a reader.
-2. **Goals.** `retargeting.human.goals` builds a goal skeleton with the proportions of
+2. **Goals.** `retargeting.ik.human.goals` builds a goal skeleton with the proportions of
    Lite and the joint rotations of the human. Its pelvis follows the human pelvis, scaled
    by the ratio of the two pelvis heights. Every other joint hangs from the joint above it
    by the Lite segment between them, and that segment turns as the human segment turns.
-   Each Lite link in `retargeting.human.LITE_PAIRS` gets a goal pose: the pelvis, thighs,
+   Each Lite link in `retargeting.ik.human.LITE_PAIRS` gets a goal pose: the pelvis, thighs,
    shins, feet, chest, head, upper arms, forearms and hands.
 3. **Foot planting.** A skeleton with other proportions does not step where the human
    steps. `kinematics.planted` finds the frames where a human foot stands on the floor,
-   from the speed and height of its ankle and toe. Then `retargeting.human.plant` shifts
+   from the speed and height of its ankle and toe. Then `retargeting.ik.human.plant` shifts
    the goal skeleton, frame by frame, so that a planted foot keeps its sole point in place
    and on the floor. It also lifts a foot whose sole would dip through the floor.
 4. **IK.** Per-frame [`mink`](https://github.com/kevinzakka/mink) IK with a free base
@@ -309,7 +308,7 @@ policy that tracks the goals in simulation, can use them in place of the IK.
 ### A G1 clip
 
 1. **Direct remap.** `lite_q = sign * g1_q + offset`, from the table in
-   `retargeting.g1.G1_TO_LITE`.
+   `retargeting.ik.g1.G1_TO_LITE`.
 2. **IK refinement.** Per-frame IK moves the result toward the pelvis-local poses of both
    feet and both hands of the G1, in position and orientation. A per-DoF posture cost
    holds the solution near the result of step 1. Thus, this step adjusts the pose but does
@@ -325,7 +324,7 @@ floor.
 
 **Driven joints.** A source drives only the Lite joints that it has data for, and every
 other joint holds its default, 0. A G1 source drives the 29 joints of
-`retargeting.g1.G1_TO_LITE`, and has no neck, ankle yaw or fingers. A human source drives
+`retargeting.ik.g1.G1_TO_LITE`, and has no neck, ankle yaw or fingers. A human source drives
 every joint between the pelvis and a link with a goal: 34 joints for LAFAN1, which has no
 fingers. The robot layer keeps the driven joints as `active_joint_names`. Thus, a motion
 with fewer driven joints can still train the robot that it covers, such as a G1 motion for
@@ -335,7 +334,7 @@ The page in `site/` shows the driven joints of each motion, and how many joints 
 Lite variant the motion drives. The page also filters the motions by the joint groups that
 they drive.
 
-**Metrics.** `retargeting.motion_metrics` measures every motion. The robot layer keeps the
+**Metrics.** `retargeting.metrics.motion_metrics` measures every motion. The robot layer keeps the
 numbers as its `metrics` property, and a run prints their mean:
 
 | Metric | What it measures |
@@ -496,7 +495,7 @@ code.
 | Paper | Here | Why |
 |---|---|---|
 | PD targets, and a reset at the nominal pose with a ramp-in | PD targets around the IK solution, and a reset at the IK state | The IK solution exists, so the policy starts from it |
-| Offsets on the source body frames | Offsets on the goals of `retargeting/human.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
+| Offsets on the source body frames | Offsets on the goals of `retargeting/ik/human.py`, in the frame of each link | The goals already fit Lite: its proportions, and planted feet |
 | Offset bounds of 0.5 | 0.1 m, 0.3 rad, 0.05 m | Lite is about 1 m tall |
 | Projected SGD on the offsets | Adam, then the projection | The paper gives no step size |
 
@@ -505,12 +504,12 @@ code.
 [UMR](https://hanyang9.github.io/UMR/) is a kinematic retargeter, like the IK of
 `retargeting/`. It matches points on the surface of an SMPL-X body to points on the surface
 of the robot. Thus it needs no table that pairs the human bodies with the links of the
-robot. The IK and ReActor use the pairs of `retargeting/human.py`. UMR reads only SMPL-X
+robot. The IK and ReActor use the pairs of `retargeting/ik/human.py`. UMR reads only SMPL-X
 motion. It takes LAFAN1 after a conversion, and AMASS in its SMPL-X form, but not a G1
 source such as Kimodo.
 
 UMR pins its own versions of torch, MuJoCo and NumPy, so it runs in an environment of its
-own, outside this package. `umr/` holds the files that run it on Lite Pro:
+own, outside this package. `src/lite_motion_retargeting/retargeting/umr/` holds the files that run it on Lite Pro:
 
 | File | What it does |
 |---|---|
@@ -558,17 +557,17 @@ repo, such as `../umr`:
    mjcf=$(cd $lmr && uv run python -c "from lite_description import get_mjcf_path; print(get_mjcf_path('lite_pro'))")
    robot=$(dirname "$(dirname "$mjcf")")
    mkdir -p UMR/assets/lite_pro && cp -r "$robot/mjcf" "$robot/meshes" UMR/assets/lite_pro/
-   cp $lmr/umr/lite_pro.json UMR/robot_configs/
-   cp $lmr/umr/batch.json UMR/lite_pro_batch.json
+   cp $lmr/src/lite_motion_retargeting/retargeting/umr/lite_pro.json UMR/robot_configs/
+   cp $lmr/src/lite_motion_retargeting/retargeting/umr/batch.json UMR/lite_pro_batch.json
    ```
 
 5. Convert the takes to SMPL-X on the CPU, then put them on the floor:
 
    ```bash
    ls $lmr/.cache/lafan1bvh/bvh | sed 's/\.bvh$//' > takes.txt
-   xargs -P 16 -n 5 .venv/bin/python $lmr/umr/lafan1_to_smplx.py lafan_to_smplx/lafan_to_smplx.py \
+   xargs -P 16 -n 5 .venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/lafan1_to_smplx.py lafan_to_smplx/lafan_to_smplx.py \
        $lmr/.cache/lafan1bvh/bvh smplx body_models < takes.txt
-   xargs .venv/bin/python $lmr/umr/ground_smplx.py body_models smplx smplx_grounded < takes.txt
+   xargs .venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/ground_smplx.py body_models smplx smplx_grounded < takes.txt
    ```
 
 6. Retarget the takes, and record what made them:
@@ -578,7 +577,7 @@ repo, such as `../umr`:
        --config robot_configs/lite_pro.json --batch-config lite_pro_batch.json \
        --motion-folder ../smplx_grounded --workers 9 --retarget-gpus 0 --output-root ../output \
        --force-build --force-train
-   ../.venv/bin/python $lmr/umr/manifest.py robot_configs/lite_pro.json \
+   ../.venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/manifest.py robot_configs/lite_pro.json \
        lite_pro_batch.json ../output/lite_pro
    ```
 
@@ -608,7 +607,7 @@ clips of `amass_clips.txt`, do steps 1 to 4 of [UMR](#umr), then these steps:
    own:
 
    ```bash
-   .venv/bin/python $lmr/umr/amass_model.py amass_model/neutral/model.npz \
+   .venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/amass_model.py amass_model/neutral/model.npz \
        body_models/smplx/SMPLX_NEUTRAL.npz body_models/amass
    .venv/bin/python -c "import json; c = json.load(open('UMR/robot_configs/lite_pro.json')); \
        c['smplx_model_dir'] = '../../body_models/amass'; \
@@ -618,8 +617,8 @@ clips of `amass_clips.txt`, do steps 1 to 4 of [UMR](#umr), then these steps:
 3. Prepare the clips into the cache of `amassx`, and give the IK the same model:
 
    ```bash
-   .venv/bin/python $lmr/umr/prepare_amass.py body_models/amass/SMPLX_NEUTRAL.npz amass \
-       $lmr/.cache/amassx/smplx $lmr/umr/amass_clips.txt
+   .venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/prepare_amass.py body_models/amass/SMPLX_NEUTRAL.npz amass \
+       $lmr/.cache/amassx/smplx $lmr/src/lite_motion_retargeting/retargeting/umr/amass_clips.txt
    mkdir -p $lmr/.cache/smplx && cp body_models/amass/SMPLX_NEUTRAL.npz $lmr/.cache/smplx/
    ```
 
@@ -630,7 +629,7 @@ clips of `amass_clips.txt`, do steps 1 to 4 of [UMR](#umr), then these steps:
        --config robot_configs/lite_pro_amass.json --batch-config lite_pro_batch.json \
        --motion-folder $lmr/.cache/amassx/smplx --workers 9 --retarget-gpus 0 \
        --output-root ../output/amass --force-build --force-train
-   ../.venv/bin/python $lmr/umr/manifest.py robot_configs/lite_pro_amass.json \
+   ../.venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/manifest.py robot_configs/lite_pro_amass.json \
        lite_pro_batch.json ../output/amass/lite_pro
    cd $lmr && uv run retarget --source amassx --workers 40 --out dataset_amass
    ```

@@ -6,9 +6,9 @@ import numpy as np
 import torch
 from mjlab.utils.lab_api.math import quat_inv, quat_mul
 
-from ..robots import joint_names, load_lite_model
-from ..sources import clips, motion_name
-from ..store import FPS, read_robot_layer
+from ...robots import joint_names, load_lite_model
+from ...sources import clips, motion_name
+from ...store import FPS, read_robot_layer
 from .env_cfg import ROBOT
 
 

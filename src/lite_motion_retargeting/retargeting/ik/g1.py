@@ -11,10 +11,10 @@ import mujoco
 import numpy as np
 from tqdm import tqdm
 
-from ..robots import BASE_BODY, G1_JOINT_NAMES, body_id, joint_qpos_addr
+from ...robots import BASE_BODY, G1_JOINT_NAMES, body_id, joint_qpos_addr
 
 if TYPE_CHECKING:
-    from . import Models
+    from .. import Models
 
 #: Lite link -> the G1 link whose pose the IK aims it at. The Lite names come from the
 #: MJCF. The G1 names come from its URDF after the MuJoCo import, which fuses the

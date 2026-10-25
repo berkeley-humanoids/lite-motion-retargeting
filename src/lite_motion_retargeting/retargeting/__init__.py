@@ -1,28 +1,18 @@
-"""Retarget one clip to the Berkeley Lite humanoid.
+"""Retarget motion to the Berkeley Lite humanoid, by one of three methods.
 
-A source is either human motion, such as the LAFAN1 BVH takes, or motion that its
-authors already retargeted to the 29-DoF Unitree G1. The loader of the source decides
-which path a clip takes, after the pipeline resamples the source to the output rate:
+* ``ik/``: the IK, the default. ``uv run retarget`` runs it on every clip of a source, and
+  writes the store.
+* ``reactor/``: ReActor, which tracks the goals of the IK store with a policy in physics.
+  ``uv run reactor`` trains it, and exports a new store.
+* ``umr/``: UMR, an outside kinematic retargeter, which runs in an environment of its own.
+  ``umr/`` holds its config for Lite Pro, and the scripts that prepare its input.
 
-* **Human**: ``human.goals`` poses a skeleton with the proportions of Lite and the
-  joint rotations of the human, and ``human.solve_ik`` reaches it frame by frame with a
-  floating base.
-* **G1, step 1**: a direct joint copy, ``lite_q = sign * g1_q + offset``, from the static
-  :data:`g1.G1_TO_LITE` table.
-* **G1, step 2**: a per-frame ``mink`` IK that refines step 1 to match the feet and hands
-  of the G1 relative to the pelvis, in position and orientation. A posture cost per DoF
-  pulls the solution toward step 1, so the IK changes step 1 only a little.
+``metrics.py`` measures a motion of any method, and ``uv run compare`` measures the methods
+on the same frames.
 
-Both paths then share:
-
-* **Grounding**: a constant pelvis-z shift per clip that puts the lowest point of the Lite
-  soles on the floor in the median frame.
-* **Metrics**: how far each goal is from the link that tracks it, how fast a foot on the
-  floor slides, how deep a sole sinks into the floor, and the fastest joint. The robot
-  layer keeps them, and a run prints their mean.
-
-``g1.py`` holds the G1 path, and ``human.py`` the human path. :func:`retarget_clip` runs
-the path of the source on one clip, then grounds the result and measures it.
+:func:`retarget_clip` runs the IK on one clip: the path of its source, then a constant
+pelvis-z shift that puts the lowest point of the Lite soles on the floor in the median
+frame, then the metrics.
 """
 
 from pathlib import Path
@@ -30,10 +20,8 @@ from typing import NamedTuple
 
 import mujoco
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from ..kinematics import (
-    lowest_points,
     planted,
     quat_mul,
     resample_motion,
@@ -53,7 +41,7 @@ from ..robots import (
 from ..sources import SOURCES
 from ..sources.human import HUMAN_BODIES, HumanClip
 from ..store import FPS
-from .g1 import (
+from .ik.g1 import (
     G1_DRIVEN,
     ROBOT_BODIES,
     SOURCE_BODIES,
@@ -61,7 +49,7 @@ from .g1 import (
     step1_direct_remap,
     step2_ik_refine,
 )
-from .human import (
+from .ik.human import (
     LITE_PAIRS,
     calibrate,
     driven_joints,
@@ -70,6 +58,7 @@ from .human import (
     plant,
     solve_ik,
 )
+from .metrics import motion_metrics
 
 
 class Models(NamedTuple):
@@ -100,11 +89,7 @@ def load_models() -> Models:
     )
 
 
-# ── Grounding and metrics ─────────────────────────────────────────────────────
-
-#: m. A sole point this close to the floor is near it, for ``near_floor_slide_cm_s``.
-CONTACT_GAP: float = 0.01
-
+# ── Grounding ─────────────────────────────────────────────────────────────────
 
 def ground_height(
     models: Models, joint_pos: np.ndarray, base_pos: np.ndarray, base_quat: np.ndarray
@@ -119,133 +104,6 @@ def ground_height(
     """
     soles = sole_points(models.lite, models.joint_addrs, joint_pos, base_pos, base_quat, FEET)
     return -float(np.median(soles[:, :, 2].min(axis=1)))
-
-
-def motion_samples(
-    models: Models,
-    base_pos: np.ndarray,
-    base_quat: np.ndarray,
-    joint_pos: np.ndarray,
-    goal_links: tuple[str, ...],
-    goal_pos: np.ndarray,
-    goal_quat: np.ndarray,
-    feet_planted: np.ndarray,
-) -> dict[str, np.ndarray]:
-    """Return the per-frame quantities that :func:`motion_metrics` sums up.
-
-    The arguments are those of :func:`motion_metrics`. ``uv run compare`` pools these
-    samples over many motions, so that a long motion counts more than a short one, and a
-    motion with no contact adds no slide. Each array has one row per frame, or per pair of
-    frames in a row, or per sample where a mask holds:
-
-    * ``foot_error_cm``, ``foot_angle_deg``, ``hand_error_cm``, ``hand_angle_deg``: ``(T, 2)``.
-    * ``foot_slide_cm_s``: the slide speeds while the source stands on a foot.
-    * ``near_floor_slide_cm_s``: the slide speeds while a sole is near the floor.
-    * ``planted_gap_cm``: the heights of the soles while the source stands on them.
-    * ``penetration_cm``: ``(T,)``, the depth of the deepest sole below the floor.
-    * ``joint_speed``: ``(T - 1,)``, the speed of the fastest joint, in rad/s.
-    * ``near_floor``: ``(T, 2)`` bool, where a sole is within :data:`CONTACT_GAP` of the floor.
-    * ``link_pos``: ``(T, P, 3)``, where each of ``goal_links`` is, the root first.
-    """
-    reached_pos, reached_quat = world_poses(
-        models.lite, models.joint_addrs, joint_pos, base_pos, base_quat, goal_links[1:]
-    )
-    error = np.linalg.norm(reached_pos - goal_pos, axis=-1) * 100.0
-    dot = np.abs(np.sum(reached_quat * goal_quat, axis=-1))
-    angle = np.degrees(2.0 * np.arccos(np.clip(dot, 0.0, 1.0)))
-    feet = [goal_links.index(link) for link in FEET]
-    hands = [goal_links.index(link) for link in ("left_hand", "right_hand")]
-
-    both = feet_planted[1:] & feet_planted[:-1]
-    foot_pos = reached_pos[:, feet]
-    foot_rot = Rotation.from_quat(reached_quat[:, feet].reshape(-1, 4)[:, [1, 2, 3, 0]])
-    foot_rot = foot_rot.as_matrix().reshape(*foot_pos.shape[:2], 3, 3)
-    soles = lowest_points(sole(models.lite, FEET), foot_pos, foot_rot)
-    # Where the touching point of frame t is one frame later.
-    local = np.einsum("tfji,tfj->tfi", foot_rot[:-1], soles[:-1] - foot_pos[:-1])
-    moved = foot_pos[1:] + np.einsum("tfij,tfj->tfi", foot_rot[1:], local)
-    speed = np.linalg.norm(moved[..., :2] - soles[:-1, :, :2], axis=-1) * FPS * 100.0
-    near = soles[..., 2] < CONTACT_GAP
-    return {
-        "foot_error_cm": error[:, feet],
-        "foot_angle_deg": angle[:, feet],
-        "hand_error_cm": error[:, hands],
-        "hand_angle_deg": angle[:, hands],
-        "foot_slide_cm_s": speed[both],
-        "near_floor_slide_cm_s": speed[near[1:] & near[:-1]],
-        "planted_gap_cm": np.abs(soles[..., 2][feet_planted]) * 100.0,
-        "penetration_cm": np.maximum(-soles[:, :, 2].min(axis=1), 0.0) * 100.0,
-        "joint_speed": np.abs(np.diff(joint_pos, axis=0)).max(axis=1) * FPS,
-        "near_floor": near,
-        "link_pos": reached_pos,
-    }
-
-
-def summarize(samples: dict[str, np.ndarray]) -> dict[str, float]:
-    """Return the metrics of :func:`motion_metrics` from the samples of :func:`motion_samples`.
-
-    A metric over an empty set, such as the slide of a motion that never touches the floor,
-    is NaN, not 0.
-    """
-
-    def mean(key: str) -> float:
-        return float(samples[key].mean()) if samples[key].size else float("nan")
-
-    def median(key: str) -> float:
-        return float(np.median(samples[key])) if samples[key].size else float("nan")
-
-    return {
-        "foot_error_cm": mean("foot_error_cm"),
-        "foot_angle_deg": mean("foot_angle_deg"),
-        "hand_error_cm": mean("hand_error_cm"),
-        "hand_angle_deg": mean("hand_angle_deg"),
-        "foot_slide_cm_s": mean("foot_slide_cm_s"),
-        "foot_slide_median_cm_s": median("foot_slide_cm_s"),
-        "near_floor_slide_cm_s": mean("near_floor_slide_cm_s"),
-        "near_floor_slide_median_cm_s": median("near_floor_slide_cm_s"),
-        "planted_gap_cm": mean("planted_gap_cm"),
-        "penetration_cm": float(np.percentile(samples["penetration_cm"], 95)),
-        "joint_speed_max": float(samples["joint_speed"].max()),
-    }
-
-
-def motion_metrics(
-    models: Models,
-    base_pos: np.ndarray,
-    base_quat: np.ndarray,
-    joint_pos: np.ndarray,
-    goal_links: tuple[str, ...],
-    goal_pos: np.ndarray,
-    goal_quat: np.ndarray,
-    feet_planted: np.ndarray,
-) -> dict[str, float]:
-    """Return how well a retargeted motion tracks its goals, and how it treats the floor.
-
-    ``goal_links`` starts with the root link. ``feet_planted`` ``(T, 2)`` tells which of
-    :data:`robots.FEET` the source stands on.
-
-    * ``foot_error_cm``, ``hand_error_cm``: the mean distance from a goal to its link.
-    * ``foot_angle_deg``, ``hand_angle_deg``: the mean angle between a goal and its link.
-    * ``foot_slide_cm_s``: the mean horizontal speed of the lowest sole point, taken as a
-      point of the foot, while the source stands on that foot in two frames in a row. A
-      foot that rolls over its sole does not slide. ``foot_slide_median_cm_s`` is the median.
-    * ``near_floor_slide_cm_s``: the same speed, while the lowest sole point is within
-      :data:`CONTACT_GAP` of the floor in two frames in a row, whatever the source does.
-      Height alone decides it, so a swing foot that passes low counts too. The IK plants
-      the feet where the source stands, so ``foot_slide_cm_s`` measures what the IK aims
-      for, and this metric does not. ``near_floor_slide_median_cm_s`` is the median.
-    * ``planted_gap_cm``: the mean distance from the lowest sole point to the floor, while
-      the source stands on that foot.
-    * ``penetration_cm``: the 95th percentile, over frames, of the deepest sole point below
-      the floor.
-    * ``joint_speed_max``: the highest speed of any joint between two frames, in rad/s. An
-      IK that flips a limb shows here.
-
-    A metric over an empty set is NaN.
-    """
-    return summarize(motion_samples(
-        models, base_pos, base_quat, joint_pos, goal_links, goal_pos, goal_quat, feet_planted
-    ))
 
 
 # ── One clip ──────────────────────────────────────────────────────────────────

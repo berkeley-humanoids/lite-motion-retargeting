@@ -1,6 +1,6 @@
 """Train ReActor on the motions of a store, or export the motions that it plays.
 
-``reactor/`` documents the method.
+``retargeting/reactor/`` documents the method.
 
 Usage:
     uv run --extra reactor reactor train --source lafan1bvh --clip '^walk'
@@ -21,10 +21,11 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 
 from .. import DATASET_ROOT, REPO_ROOT
 from ..kinematics import planted
-from ..reactor.env_cfg import WRENCH_WEIGHT, agent_cfg, env_cfg
-from ..reactor.library import build_library, motion_paths
-from ..reactor.mdp import GoalCommandCfg, lost_track
-from ..retargeting import load_models, motion_metrics
+from ..retargeting import load_models
+from ..retargeting.metrics import motion_metrics
+from ..retargeting.reactor.env_cfg import WRENCH_WEIGHT, agent_cfg, env_cfg
+from ..retargeting.reactor.library import build_library, motion_paths
+from ..retargeting.reactor.mdp import GoalCommandCfg, lost_track
 from ..robots import FEET, lite_urdf_path
 from ..store import BASE_LAYER, FPS, write_asset, write_blueprint, write_robot_layer
 
@@ -86,7 +87,7 @@ def export(run: Path, out: Path, checkpoint: str | None = None) -> None:
     from the IK solution of that frame, and the piece before it ends :data:`CUT_SECONDS`
     earlier. Export writes each piece of at least :data:`PIECE_SECONDS`. A motion that never
     lost track is one piece and keeps its name. Other pieces get the name
-    ``<name>_f<first frame>``. The metrics of ``retargeting.motion_metrics`` compare each piece
+    ``<name>_f<first frame>``. The metrics of ``retargeting.metrics.motion_metrics`` compare each piece
     with the learned goals. Four more metrics measure the wrench, in N and N m:
     ``wrench_force_max``, ``wrench_force_mean``, ``wrench_torque_max`` and
     ``wrench_torque_mean``. A high peak with a low mean is a short push.

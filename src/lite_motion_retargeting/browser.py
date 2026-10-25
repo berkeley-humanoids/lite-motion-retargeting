@@ -42,7 +42,7 @@ from tqdm import tqdm
 
 from . import DATASET_ROOT, SITE_ROOT
 from .hub import VIEWER, layer_url
-from .retargeting.g1 import G1_DRIVEN
+from .retargeting.ik.g1 import G1_DRIVEN
 from .robots import joint_names, lite_urdf_path, load_lite_model
 from .sources import SOURCES, clip_dir, clip_key, motion_name, source_of
 from .store import BASE_LAYER, read_robot_layer

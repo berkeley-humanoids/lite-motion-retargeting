@@ -29,10 +29,10 @@ import numpy as np
 from lite_description import get_mjcf_path
 from scipy.ndimage import uniform_filter1d
 
-from ..kinematics import Sole, lowest_points, quat_mul, sole_points
-from ..robots import FEET, body_id, joint_qpos_addr
-from ..sources.human import HUMAN_BODIES, HUMAN_PARENTS
-from ..store import FPS
+from ...kinematics import Sole, lowest_points, quat_mul, sole_points
+from ...robots import FEET, body_id, joint_qpos_addr
+from ...sources.human import HUMAN_BODIES, HUMAN_PARENTS
+from ...store import FPS
 
 #: Human body -> the Lite link at the joint that the body turns about. A toe has none.
 ANCHORS: dict[str, str] = {

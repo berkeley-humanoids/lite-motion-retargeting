@@ -24,7 +24,7 @@ from tqdm import tqdm
 from .. import DATASET_ROOT
 from ..hub import hub_dataset_of
 from ..retargeting import Clip, Models, load_models, retarget_clip
-from ..retargeting.g1 import G1_TO_LITE
+from ..retargeting.ik.g1 import G1_TO_LITE
 from ..robots import lite_urdf_path
 from ..sources import clips, motion_name
 from ..store import (

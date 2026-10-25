@@ -159,7 +159,7 @@ def write_robot_layer(
     Its goal is the base trajectory of the retarget, so the goal and the reached pose are
     the same pose for that one body.
 
-    ``metrics`` are the quality numbers of ``retargeting.motion_metrics``. The layer keeps
+    ``metrics`` are the quality numbers of ``retargeting.metrics.motion_metrics``. The layer keeps
     them as the ``metrics`` property, so a motion records how well the retarget went.
 
     ``active_joints`` are the joints that the source drives, kept as

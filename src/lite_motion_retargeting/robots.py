@@ -83,7 +83,7 @@ def model_hash(mjcf_path: Path) -> str:
 
     The hash names one version of a robot model. ``mjcf_path`` is ``<robot>/mjcf/<name>.xml``,
     as ``lite-description`` lays it out, or the copy of it that UMR reads. UMR writes files
-    of its own into the ``mjcf`` folder, so only the MJCF itself counts. ``umr/manifest.py``
+    of its own into the ``mjcf`` folder, so only the MJCF itself counts. ``retargeting/umr/manifest.py``
     computes the same hash.
     """
     digest = hashlib.sha256()

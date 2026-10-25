@@ -23,7 +23,7 @@ for the robot trains on its output, in Lite-Motion-Tracking.
 
 ReActor reads the store that ``uv run retarget`` wrote, and writes a new store. The new
 store has one robot layer per motion, with the simulated joints, the learned goals, and the
-metrics of ``retargeting.motion_metrics``. ReActor welds each joint that no motion drives,
+metrics of ``retargeting.metrics.motion_metrics``. ReActor welds each joint that no motion drives,
 such as a finger joint.
 
 The environment follows the layout of an mjlab task: ``mdp.py`` holds its terms, and

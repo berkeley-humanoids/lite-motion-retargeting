@@ -49,17 +49,15 @@ def read_umr(
     qpos = data["qpos"].astype(np.float64)
     names = [str(name) for name in data["robot_joint_names"]]
     columns = [7 + names.index(name) for name in joint_names]
-    motion = resample_motion(
-        {"base_pos": qpos[:, :3], "base_quat_wxyz": qpos[:, 3:7], "g1_joint_pos": qpos[:, columns]},
-        round(float(data["fps"][0])),
-        FPS,
+    base_pos, base_quat, joint_pos = resample_motion(
+        qpos[:, :3], qpos[:, 3:7], qpos[:, columns], round(float(data["fps"][0])), FPS
     )
-    pos = Rotation.from_euler("z", turn).apply(motion["base_pos"])
-    quat = quat_mul(np.array([np.cos(turn / 2), 0.0, 0.0, np.sin(turn / 2)]), motion["base_quat_wxyz"])
+    pos = Rotation.from_euler("z", turn).apply(base_pos)
+    quat = quat_mul(np.array([np.cos(turn / 2), 0.0, 0.0, np.sin(turn / 2)]), base_quat)
     n = min(len(pos), len(ref_pos))
     pos[:, :2] += (ref_pos[:n, :2] - pos[:n, :2]).mean(axis=0)
     heading = np.degrees(np.angle(np.median(np.exp(1j * (_yaw(quat[:n]) - _yaw(ref_quat[:n]))))))
-    return pos, quat, motion["g1_joint_pos"], float(heading)
+    return pos, quat, joint_pos, float(heading)
 
 
 def umr_model(folder: Path) -> str | None:

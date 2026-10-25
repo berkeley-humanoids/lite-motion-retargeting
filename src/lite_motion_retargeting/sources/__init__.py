@@ -15,7 +15,7 @@ from typing import NamedTuple
 from .. import CACHE_ROOT
 from .bvh import SEED_ARCHIVE, load_lafan1_bvh, load_seed_bvh, unpack_seed
 from .g1 import (
-    Motion,
+    G1Clip,
     load_amass,
     load_kimodo,
     load_lafan1,
@@ -39,8 +39,8 @@ class Source(NamedTuple):
     #: directory. A motion gets its name from the path of its clip below this directory.
     clip_dir: str
     clip_glob: str
-    #: Reads one clip: a human clip, or a G1 clip with its rate in Hz.
-    load: Callable[[Path], HumanClip | tuple[Motion, int]]
+    #: Reads one clip.
+    load: Callable[[Path], HumanClip | G1Clip]
     #: The Hub dataset repo of the set, and the Hub glob patterns that ``uv run download``
     #: downloads from it by default.
     repo_id: str | None = None

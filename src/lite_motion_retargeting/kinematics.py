@@ -21,9 +21,12 @@ CONTACT_HEIGHT: float = 0.05
 
 
 def resample_motion(
-    motion: dict[str, np.ndarray], src_fps: int, dst_fps: int
-) -> dict[str, np.ndarray]:
-    """Resample the output of a G1 source loader from ``src_fps`` to ``dst_fps``.
+    base_pos: np.ndarray, base_quat: np.ndarray, joint_pos: np.ndarray, src_fps: int, dst_fps: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Resample a robot motion from ``src_fps`` to ``dst_fps``.
+
+    The motion is the base position ``(T, 3)``, the base rotation ``(T, 4)`` in wxyz, and the
+    joints ``(T, J)``.
 
     The pipeline resamples the source, not the retarget, so that the IK solves every frame
     that goes into the file, and the body poses stay the exact kinematics of the joints
@@ -35,15 +38,11 @@ def resample_motion(
     sample. The clip keeps it from going past the last input sample, which ``Slerp``
     rejects.
     """
-    frames = motion["base_pos"].shape[0]
+    frames = base_pos.shape[0]
     if dst_fps == src_fps or frames < 2:
-        return motion
+        return base_pos, base_quat, joint_pos
     t_src, t_dst = _resample_times(frames, src_fps, dst_fps)
-    return {
-        "base_pos": _interp(t_dst, t_src, motion["base_pos"]),
-        "base_quat_wxyz": _slerp(t_dst, t_src, motion["base_quat_wxyz"]),
-        "g1_joint_pos": _interp(t_dst, t_src, motion["g1_joint_pos"]),
-    }
+    return _interp(t_dst, t_src, base_pos), _slerp(t_dst, t_src, base_quat), _interp(t_dst, t_src, joint_pos)
 
 
 def resample_poses(

@@ -39,6 +39,7 @@ from ..robots import (
     load_lite_model,
 )
 from ..sources import SOURCES
+from ..sources.g1 import G1Clip
 from ..sources.human import HUMAN_BODIES, HumanClip
 from ..store import FPS
 from .ik.g1 import (
@@ -145,36 +146,35 @@ def retarget_clip(models: Models, source: str, path: Path) -> Clip:
     loaded = SOURCES[source].load(path)
     if isinstance(loaded, HumanClip):
         return _retarget_human(models, loaded)
-    return _retarget_g1(models, *loaded)
+    return _retarget_g1(models, loaded)
 
 
-def _retarget_g1(models: Models, clip: dict[str, np.ndarray], source_fps: int) -> Clip:
+def _retarget_g1(models: Models, clip: G1Clip) -> Clip:
     """Retarget one G1 clip: the joint copy of ``ik/g1.py``, then the IK that refines it."""
     source_pos, source_quat = world_poses(
-        models.g1, models.g1_addrs, clip["g1_joint_pos"],
-        clip["base_pos"], clip["base_quat_wxyz"], SOURCE_BODIES[1:],
+        models.g1, models.g1_addrs, clip.joint_pos, clip.base_pos, clip.base_quat, SOURCE_BODIES[1:]
     )
 
-    motion = resample_motion(clip, source_fps, FPS)
-    joint_pos = step1_direct_remap(motion["g1_joint_pos"], models.joint_names)
-    joint_pos = step2_ik_refine(models, motion["g1_joint_pos"], joint_pos)
+    base_pos, base_quat, g1_joint_pos = resample_motion(clip.base_pos, clip.base_quat, clip.joint_pos, clip.fps, FPS)
+    joint_pos = step1_direct_remap(g1_joint_pos, models.joint_names)
+    joint_pos = step2_ik_refine(models, g1_joint_pos, joint_pos)
     joint_pos[:, [name not in G1_DRIVEN for name in models.joint_names]] = 0.0
 
-    base_pos = motion["base_pos"].astype(np.float32)
-    base_quat = motion["base_quat_wxyz"].astype(np.float32)
+    base_pos = base_pos.astype(np.float32)
+    base_quat = base_quat.astype(np.float32)
     base_pos[:, 2] += ground_height(models, joint_pos, base_pos, base_quat)
 
     # The goal rides the base trajectory of the retarget, not that of the source, so it
     # sits where the Lite pelvis sits and the two are directly comparable.
     goal_pos, goal_quat = world_poses(
-        models.g1, models.g1_addrs, motion["g1_joint_pos"], base_pos, base_quat, SOURCE_BODIES[1:]
+        models.g1, models.g1_addrs, g1_joint_pos, base_pos, base_quat, SOURCE_BODIES[1:]
     )
     goal_quat = quat_mul(goal_quat, models.goal_conv).astype(np.float32)
     feet_planted = planted(goal_pos[:, [ROBOT_BODIES.index(foot) for foot in FEET], None], FPS)
     return Clip(
-        source_fps=source_fps,
+        source_fps=clip.fps,
         source_joint_names=G1_JOINT_NAMES,
-        source_joint_pos=clip["g1_joint_pos"],
+        source_joint_pos=clip.joint_pos,
         source_bodies=SOURCE_BODIES,
         source_pos=source_pos,
         source_quat=source_quat,

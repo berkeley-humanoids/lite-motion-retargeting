@@ -36,7 +36,6 @@ from functools import partial
 from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
 from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
@@ -46,7 +45,7 @@ from .hub import VIEWER, layer_url
 from .retargeting.g1 import G1_DRIVEN
 from .robots import joint_names, lite_urdf_path, load_lite_model
 from .sources import SOURCES, clip_dir, clip_key, motion_name, source_of
-from .store import BASE_LAYER
+from .store import BASE_LAYER, read_robot_layer
 
 SITE_DATA: Path = SITE_ROOT / "data"
 
@@ -75,6 +74,7 @@ ROBOTS: dict[str, str] = {
     "lite": "Lite",
     "lite_pro": "Lite Pro",
 }
+
 
 def build(sources: list[str] | None = None, out: Path = SITE_DATA) -> None:
     """Write ``site/data/`` from the robot layer of ``dataset/``.
@@ -214,7 +214,14 @@ def export_motion(path: Path, robot: str) -> dict:
     the joints that move, and ``active`` lists the joints that the source drives, both as
     positions in ``joint_names``.
     """
-    fps, names, active, rows = read_robot_layer(path, robot)
+    layer = read_robot_layer(path, robot)
+    fps, names = int(layer["fps"]), list(layer["joint_names"])
+    # A layer older than its active_joint_names comes from a G1 source.
+    active = layer["active"] or G1_DRIVEN
+    # The pelvis goal is the base where the retarget placed the robot. The page takes the
+    # rotation as xyzw, the three.js order.
+    pelvis = layer["bodies"].index("pelvis")
+    rows = np.hstack([layer["goal_pos"][:, pelvis], layer["goal_quat"][:, pelvis, [1, 2, 3, 0]], layer["joint_pos"]])
     # A joint that stays at zero, such as a finger, adds bytes and no motion.
     moving = np.flatnonzero(np.abs(rows[:, 7:]).max(axis=0) > 0.0)
     rows = np.hstack([rows[:, :7], rows[:, 7 + moving]])
@@ -239,44 +246,6 @@ def export_motion(path: Path, robot: str) -> dict:
         "joints": tuple(moving.tolist()),
         "active": tuple(names.index(name) for name in active),
     }
-
-
-def read_robot_layer(path: Path, robot: str) -> tuple[int, list[str], list[str], np.ndarray]:
-    """Read the rate, joint names, driven joints and ``(T, 7 + J)`` rows of a robot layer.
-
-    The pelvis pose comes from the pelvis goal, which is the base where the retarget placed
-    the robot. Thus the pose is exactly where the joint chain in the file puts the root. A
-    layer without ``active_joint_names`` is older than that property. Such a layer comes
-    from a G1 source, so it drives the G1 joints.
-    """
-    positions = f"/{robot}/joint/positions"
-    pelvis = f"/{robot}/goal/poses/pelvis"
-    columns: dict[str, list[pa.RecordBatch]] = {}
-    joint_names, active, fps = None, None, None
-    for chunk in RrdReader(path).stream():
-        entity = chunk.entity_path
-        if entity == f"/__properties/{robot}":
-            properties = chunk.to_record_batch().to_pydict()
-            joint_names, fps = properties["joint_names"][0], properties["fps"][0][0]
-            active = properties.get("active_joint_names", [G1_DRIVEN])[0]
-        elif entity in (positions, pelvis):
-            columns.setdefault(entity, []).append(chunk.to_record_batch())
-    if joint_names is None:
-        raise SystemExit(f"{path}: no /__properties/{robot}, so the file is not a robot layer.")
-
-    def values(entity: str, component: str, width: int) -> np.ndarray:
-        table = pa.Table.from_batches(columns[entity]).sort_by("frame")
-        flat = table.column(component).combine_chunks().flatten()
-        if pa.types.is_fixed_size_list(flat.type):
-            flat = flat.flatten()
-        return flat.to_numpy().astype(np.float32).reshape(-1, width)
-
-    rows = np.hstack([
-        values(pelvis, "Transform3D:translation", 3),
-        values(pelvis, "Transform3D:quaternion", 4),
-        values(positions, "Scalars:scalars", len(joint_names)),
-    ])
-    return int(fps), list(joint_names), list(active), rows
 
 
 def read_source_fps(path: Path) -> int | None:

@@ -23,7 +23,7 @@ from .. import DATASET_ROOT, REPO_ROOT
 from ..kinematics import planted
 from ..retargeting import load_models
 from ..retargeting.metrics import motion_metrics
-from ..retargeting.reactor.env_cfg import WRENCH_WEIGHT, agent_cfg, env_cfg
+from ..retargeting.reactor.env_cfg import agent_cfg, env_cfg
 from ..retargeting.reactor.library import build_library, motion_paths
 from ..retargeting.reactor.mdp import GoalCommandCfg, lost_track
 from ..robots import FEET, lite_urdf_path
@@ -46,7 +46,6 @@ def train(
     num_envs: int = 4096,
     iterations: int = 10_000,
     warmstart: int = 1_000,
-    wrench_weight: float = WRENCH_WEIGHT,
     run_name: str = "",
 ) -> None:
     """Train the policy and the goal offsets on the motions of ``source`` in ``store``.
@@ -58,7 +57,6 @@ def train(
         num_envs: The number of parallel simulations.
         iterations: The number of PPO iterations.
         warmstart: The number of PPO iterations before the goal offsets start to learn.
-        wrench_weight: The penalty on the L1 norm of the root force and of the root torque.
         run_name: A suffix for the name of the run directory. The run directory also keeps
             these arguments, in ``train.json``.
     """
@@ -72,7 +70,7 @@ def train(
     print(f"{len(paths)} motions, {len(joints)} joints actuated -> {run}")
 
     goals = GoalCommandCfg(library=str(library), warmstart=warmstart, save_to=str(run / "goals.pt"))
-    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals, wrench_weight), device=DEVICE)
+    env = ManagerBasedRlEnv(cfg=env_cfg(joints, num_envs, goals), device=DEVICE)
     runner = MjlabOnPolicyRunner(RslRlVecEnvWrapper(env), asdict(agent_cfg(iterations, run_name)), str(run), DEVICE)
     runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True)
     env.command_manager.get_term("goals").save(run / "goals.pt")

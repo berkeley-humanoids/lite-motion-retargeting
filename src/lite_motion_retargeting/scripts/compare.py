@@ -26,7 +26,7 @@ Three metrics compare a motion with its source, whatever the method aims for:
   stands, as the intersection over the union of the two.
 
 UMR can place a motion in a world of its own. For LAFAN1, ``lafan_to_smplx`` turns the BVH
-axes into (x, -z, y), and ``sources/human.py`` into (z, x, y), so the world of UMR is that
+axes into (x, -z, y), and ``sources/bvh.py`` into (z, x, y), so the world of UMR is that
 of the IK turned by -90 degrees about z. AMASS SMPL-X reaches UMR and the IK in its own
 world. This step turns a UMR motion by the angle of its source in :data:`UMR_TURNS`, and
 shifts it by one offset per motion. A fit of the turn would hide an error of heading, and a

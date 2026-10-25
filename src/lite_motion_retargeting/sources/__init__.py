@@ -2,8 +2,9 @@
 
 A human source, such as the LAFAN1 BVH takes, has a loader that returns a
 :class:`human.HumanClip`: the bodies of one shared human skeleton, which ``human.py``
-defines. A new human format needs only a reader into that skeleton. ``g1.py`` reads the
-G1 sources, which share one layout per frame.
+defines. A new human format needs only a reader into that skeleton: ``bvh.py`` reads BVH
+takes, and ``smplx.py`` reads SMPL-X clips. ``g1.py`` reads the G1 sources, which share one
+layout per frame.
 """
 
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .. import CACHE_ROOT
+from .bvh import SEED_ARCHIVE, load_lafan1_bvh, load_seed_bvh, unpack_seed
 from .g1 import (
     Motion,
     load_amass,
@@ -20,14 +22,8 @@ from .g1 import (
     load_motiondecode,
     unpack_kimodo,
 )
-from .human import (
-    SEED_ARCHIVE,
-    HumanClip,
-    load_amass_smplx,
-    load_lafan1_bvh,
-    load_seed_bvh,
-    unpack_seed,
-)
+from .human import HumanClip
+from .smplx import load_amass_smplx
 
 
 class Source(NamedTuple):

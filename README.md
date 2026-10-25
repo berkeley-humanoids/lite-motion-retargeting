@@ -577,8 +577,8 @@ repo, such as `../umr`:
        --config robot_configs/lite_pro.json --batch-config lite_pro_batch.json \
        --motion-folder ../smplx_grounded --workers 9 --retarget-gpus 0 --output-root ../output \
        --force-build --force-train
-   ../.venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/manifest.py robot_configs/lite_pro.json \
-       lite_pro_batch.json ../output/lite_pro
+   uv run --project $lmr python -m lite_motion_retargeting.retargeting.umr.manifest \
+       robot_configs/lite_pro.json lite_pro_batch.json ../output/lite_pro
    ```
 
    UMR writes `output/lite_pro/<take>_lite_pro.npz`, at 30 Hz. `uv run compare`
@@ -629,8 +629,8 @@ clips of `amass_clips.txt`, do steps 1 to 4 of [UMR](#umr), then these steps:
        --config robot_configs/lite_pro_amass.json --batch-config lite_pro_batch.json \
        --motion-folder $lmr/.cache/amassx/smplx --workers 9 --retarget-gpus 0 \
        --output-root ../output/amass --force-build --force-train
-   ../.venv/bin/python $lmr/src/lite_motion_retargeting/retargeting/umr/manifest.py robot_configs/lite_pro_amass.json \
-       lite_pro_batch.json ../output/amass/lite_pro
+   uv run --project $lmr python -m lite_motion_retargeting.retargeting.umr.manifest \
+       robot_configs/lite_pro_amass.json lite_pro_batch.json ../output/amass/lite_pro
    cd $lmr && uv run retarget --source amassx --workers 40 --out dataset_amass
    ```
 

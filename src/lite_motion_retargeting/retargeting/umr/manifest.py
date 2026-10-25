@@ -1,30 +1,21 @@
 """Write ``manifest.json`` beside the motions of a UMR run, to record what made them.
 
-The manifest holds the hash of the robot model that UMR read, the commit of UMR, and both
-configs. The hash is the ``robots.model_hash`` of this package, over the MJCF of the robot
-and its ``meshes`` folder. ``uv run compare`` reads it, and stops if the run used
-another model of Lite Pro than the installed one. UMR names its caches after the robot and
-the betas, not the geometry, so the manifest is the only record of the model.
+The manifest holds the ``robots.model_hash`` of the robot model that UMR read, the commit of
+UMR, and both configs. UMR names its caches after the robot and the betas, not the geometry,
+so the manifest is the only record of the model. ``uv run compare`` stops if the run used
+another model of Lite Pro than the installed one.
 
 Usage, in the clone of UMR, after the run:
-    python manifest.py <robot config> <batch config> <motion dir>
+    uv run --project <this repo> python -m lite_motion_retargeting.retargeting.umr.manifest \\
+        <robot config> <batch config> <motion dir>
 """
 
-import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 
-
-def model_hash(mjcf_path: Path) -> str:
-    """Return a short hash of a robot MJCF and of the ``meshes`` folder beside its folder."""
-    digest = hashlib.sha256()
-    meshes = mjcf_path.parent.parent / "meshes"
-    for path in [mjcf_path, *sorted(path for path in meshes.rglob("*") if path.is_file())]:
-        digest.update(path.relative_to(mjcf_path.parent.parent).as_posix().encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()[:12]
+from ...robots import model_hash
 
 
 def main() -> None:

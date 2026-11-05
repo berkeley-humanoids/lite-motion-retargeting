@@ -35,9 +35,10 @@ SOURCE_BODIES: tuple[str, ...] = (BASE_BODY, *IK_BODY_PAIRS.values())
 #: ``lite_q = sign * g1_q + offset`` for each joint:
 #:
 #: - Legs: the chain order and the axes match, so the sign is +1 and the offset is 0.
-#: - Waist: the chain order differs (G1 yaw, roll, pitch, and Lite yaw, pitch, roll), but
-#:   the axes match by name. The table maps by name, which is a small approximation when
-#:   more than one waist joint is not zero.
+#: - Waist: the chain order differs (G1 yaw, roll, pitch, and Lite yaw, pitch, roll). The
+#:   table maps by name, which is a small approximation when more than one waist joint is
+#:   not zero. Yaw and roll have the same positive direction. Pitch has the opposite one:
+#:   +0.3 rad bends the G1 torso 17° forward and the Lite chest 17° back, so its sign is -1.
 #: - Shoulders and elbows: the chain order matches. The offsets (±π/2 on shoulder roll and
 #:   elbow) move the G1 rest pose, arms down, to the Lite rest pose, a T-pose.
 #: - Wrists: the chain order differs (G1 roll, pitch, yaw, and Lite yaw, roll, pitch), but
@@ -61,7 +62,7 @@ G1_TO_LITE: dict[str, tuple[str, int, float]] = {
     # Waist (3)
     "waist_yaw_joint":           ("waist_yaw",           +1, 0.0),
     "waist_roll_joint":          ("waist_roll",          +1, 0.0),
-    "waist_pitch_joint":         ("waist_pitch",         +1, 0.0),
+    "waist_pitch_joint":         ("waist_pitch",         -1, 0.0),
     # Arms (14) — left
     "left_shoulder_pitch_joint": ("left_shoulder_pitch", +1, 0.0),
     "left_shoulder_roll_joint":  ("left_shoulder_roll",  +1, -1.5708),
